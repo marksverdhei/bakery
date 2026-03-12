@@ -193,11 +193,20 @@ class PromptBakingTrainer(Trainer):
             attention_mask=student_inputs["attention_mask"],
         )
 
+        # With left-padding, each sequence has leading pad tokens that shift
+        # the real content rightward. Compute per-sequence padding offsets.
+        t_seq_len = teacher_inputs["input_ids"].shape[1]
+        s_seq_len = student_inputs["input_ids"].shape[1]
+        t_real_lengths = teacher_inputs["attention_mask"].sum(dim=1)
+        s_real_lengths = student_inputs["attention_mask"].sum(dim=1)
+
         losses = []
 
         for i in range(len(pairs)):
-            t_start = teacher_prompt_lengths[i]
-            s_start = student_prompt_lengths[i]
+            t_pad = t_seq_len - t_real_lengths[i].item()
+            s_pad = s_seq_len - s_real_lengths[i].item()
+            t_start = int(t_pad) + teacher_prompt_lengths[i]
+            s_start = int(s_pad) + student_prompt_lengths[i]
 
             t_logits = teacher_outputs.logits[i : i + 1, t_start - 1 : -1, :]
             s_logits = student_outputs.logits[i : i + 1, s_start - 1 : -1, :]

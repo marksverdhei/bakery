@@ -1,5 +1,7 @@
 """Evaluation utilities for prompt baking."""
 
+import re
+
 import torch
 from typing import List, Tuple, Optional
 
@@ -59,7 +61,7 @@ def evaluate_model(
             outputs[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True
         )
         response_clean = (
-            response.replace("<think>", "").replace("</think>", "").strip().lower()
+            re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip().lower()
         )
 
         is_correct = any(kw in response_clean for kw in expected_keywords)

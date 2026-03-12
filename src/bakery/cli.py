@@ -59,18 +59,26 @@ def main():
         baking_config, data_config, lora_config = parser.parse_yaml_file(
             config_file, allow_extra_keys=True
         )
-        # Apply CLI overrides on top of YAML config
+        # Apply CLI overrides on top of YAML config.
+        # We parse the remaining CLI args into fresh dataclasses, then detect
+        # which fields were explicitly set by comparing against a baseline
+        # (dataclasses parsed with no args at all).
         if remaining_args:
             override_parser = HfArgumentParser((BakeryConfig, DataConfig, LoraConfig))
-            overrides = override_parser.parse_args_into_dataclasses(
-                args=remaining_args, return_remaining_strings=True
+            baseline = override_parser.parse_args_into_dataclasses(
+                args=["--output_dir", baking_config.output_dir]
             )
-            for override_cfg, base_cfg in zip(
-                overrides[:3], (baking_config, data_config, lora_config)
+            overrides = override_parser.parse_args_into_dataclasses(
+                args=["--output_dir", baking_config.output_dir] + remaining_args,
+                return_remaining_strings=True,
+            )
+            for override_cfg, baseline_cfg, base_cfg in zip(
+                overrides[:3],
+                baseline,
+                (baking_config, data_config, lora_config),
             ):
                 for k, v in vars(override_cfg).items():
-                    default = type(base_cfg).__dataclass_fields__.get(k)
-                    if default is not None and v != default.default:
+                    if v != getattr(baseline_cfg, k):
                         setattr(base_cfg, k, v)
     else:
         baking_config, data_config, lora_config = parser.parse_args_into_dataclasses()
