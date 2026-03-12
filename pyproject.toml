@@ -1,13 +1,23 @@
 [project]
-name = "python-template"
+name = "bakery"
 version = "0.1.0"
-description = "Add your description here"
+description = "Where LLMs go to get baked"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "torch>=2.0",
+    "transformers>=4.45",
+    "datasets>=3.0",
+    "peft>=0.13",
+    "accelerate>=1.0",
+]
+
+[project.optional-dependencies]
+qlora = ["bitsandbytes>=0.44"]
+eval = ["rouge-score>=0.1"]
 
 [project.scripts]
-python-template = "python_template:cli.main"
+bakery = "bakery.cli:main"
 
 [build-system]
 requires = ["hatchling"]

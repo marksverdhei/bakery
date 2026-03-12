@@ -1,0 +1,45 @@
+# Prompt baking from an existing SFT/chat dataset
+#
+# Instead of generating trajectories on-the-fly, this uses
+# precomputed (user, assistant) pairs from a HuggingFace dataset.
+#
+# Usage:
+#   bakery --config examples/sft_dataset.yaml
+
+# --- Standard TrainingArguments ---
+output_dir: "./outputs/sft_bake"
+num_train_epochs: 1
+learning_rate: 5e-5
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 4
+max_grad_norm: 1.0
+logging_steps: 10
+save_strategy: "epoch"
+optim: "adamw_torch"
+bf16: true
+report_to: "none"
+seed: 42
+lr_scheduler_type: "cosine"
+warmup_ratio: 0.05
+
+# --- Prompt baking ---
+system_prompt: "You are a helpful, harmless, and honest assistant."
+temperature: 1.0
+
+# --- Model ---
+model_name_or_path: "Qwen/Qwen3-0.6B"
+torch_dtype: "bfloat16"
+
+# --- LoRA ---
+r: 32
+lora_alpha: 64
+target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+lora_dropout: 0.05
+
+# --- Data: HuggingFace chat dataset ---
+sft_dataset: "HuggingFaceH4/ultrachat_200k"
+sft_dataset_split: "train_sft[:1000]"
