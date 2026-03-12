@@ -124,7 +124,9 @@ class PromptBakingTrainer(Trainer):
 
     # -- Loss computation --
 
-    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+    def compute_loss(
+        self, model, inputs, return_outputs=False, num_items_in_batch=None
+    ):
         """Compute KL divergence loss with batched forward passes."""
         user_messages = inputs.get("user_messages", [])
         responses = inputs.get("responses", [])

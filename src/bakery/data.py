@@ -147,8 +147,16 @@ def _load_json(path: str) -> Tuple[List[str], Optional[List[str]]]:
 
     # Unwrap nested containers
     if isinstance(data, dict):
-        for key in ("pairs", "data", "samples", "completions",
-                     "training_samples", "training_prompts", "prompts", "questions"):
+        for key in (
+            "pairs",
+            "data",
+            "samples",
+            "completions",
+            "training_samples",
+            "training_prompts",
+            "prompts",
+            "questions",
+        ):
             if key in data:
                 data = data[key]
                 break
@@ -161,8 +169,10 @@ def _load_json(path: str) -> Tuple[List[str], Optional[List[str]]]:
     prompts, responses = [], []
     has_responses = False
     for item in data:
-        p = item.get("prompt", item.get("user_message", item.get("input",
-            item.get("question", ""))))
+        p = item.get(
+            "prompt",
+            item.get("user_message", item.get("input", item.get("question", ""))),
+        )
         r = item.get("response", item.get("completion", item.get("output", "")))
         if p:
             prompts.append(p)
@@ -248,7 +258,9 @@ def load_eval_data(eval_file: Optional[str]) -> List[Tuple[str, List[str]]]:
     for item in items:
         question = item.get("question", item.get("input", ""))
         answer = item.get("answer", item.get("expected", item.get("target", "")))
-        keywords = [answer.lower()] if isinstance(answer, str) else [a.lower() for a in answer]
+        keywords = (
+            [answer.lower()] if isinstance(answer, str) else [a.lower() for a in answer]
+        )
         qa_pairs.append((question, keywords))
 
     return qa_pairs

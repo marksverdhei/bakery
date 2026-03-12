@@ -1,4 +1,4 @@
-name: Ruff
+name: Prek
 on:
   push:
     branches: main
@@ -6,8 +6,10 @@ on:
     branches: "*"
 
 jobs:
-  ruff:
+  prek:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/ruff-action@v3
+      - uses: j178/prek-action@v1
+        with:
+          extra-args: '--all-files'

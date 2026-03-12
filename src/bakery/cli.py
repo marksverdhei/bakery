@@ -74,7 +74,7 @@ def main():
     if precomputed_responses:
         print(f"  Precomputed responses: {len(precomputed_responses)}")
     else:
-        print(f"  Mode: on-the-fly trajectory generation")
+        print("  Mode: on-the-fly trajectory generation")
     if eval_qa:
         print(f"  Evaluation Q&A: {len(eval_qa)}")
     if heldout_qa:
@@ -119,14 +119,20 @@ def main():
         baseline_none = evaluate_model(base_model, tokenizer, eval_qa, "Baseline")
         print("\n  === With system prompt (discrete) ===")
         baseline_discrete = evaluate_model(
-            base_model, tokenizer, eval_qa, "Discrete prompt",
+            base_model,
+            tokenizer,
+            eval_qa,
+            "Discrete prompt",
             system_prompt=system_prompt,
         )
         heldout_discrete = None
         if heldout_qa:
             print("\n  === Held-out (discrete prompt) ===")
             heldout_discrete = evaluate_model(
-                base_model, tokenizer, heldout_qa, "Discrete (held-out)",
+                base_model,
+                tokenizer,
+                heldout_qa,
+                "Discrete (held-out)",
                 system_prompt=system_prompt,
             )
     else:
@@ -153,7 +159,9 @@ def main():
     # Create dataset
     print("\n[4] Training with KL divergence...")
     if precomputed_responses:
-        print(f"  Using {len(precomputed_responses)} precomputed (prompt, response) pairs")
+        print(
+            f"  Using {len(precomputed_responses)} precomputed (prompt, response) pairs"
+        )
     else:
         print(
             f"  Generating {baking_config.num_trajectories} trajectories per prompt on-the-fly"

@@ -89,9 +89,11 @@ def test_load_json_prompts_only_dicts():
 
 def test_load_json_wrapped():
     """Nested format like {"pairs": [...]} → unwrapped correctly."""
-    data = {"pairs": [
-        {"prompt": "Hi", "response": "Hello"},
-    ]}
+    data = {
+        "pairs": [
+            {"prompt": "Hi", "response": "Hello"},
+        ]
+    }
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(data, f)
         path = f.name
