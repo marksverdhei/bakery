@@ -60,7 +60,10 @@ class BakeryConfig(TrainingArguments):
         ):
             val = getattr(self, attr, None)
             if isinstance(val, str):
-                setattr(self, attr, float(val))
+                try:
+                    setattr(self, attr, float(val))
+                except ValueError:
+                    raise ValueError(f"Cannot convert {attr}={val!r} to float")
         for attr in (
             "num_trajectories",
             "trajectory_length",
@@ -70,7 +73,10 @@ class BakeryConfig(TrainingArguments):
         ):
             val = getattr(self, attr, None)
             if isinstance(val, str):
-                setattr(self, attr, int(val))
+                try:
+                    setattr(self, attr, int(val))
+                except ValueError:
+                    raise ValueError(f"Cannot convert {attr}={val!r} to int")
 
         super().__post_init__()
 

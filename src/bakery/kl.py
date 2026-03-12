@@ -44,3 +44,14 @@ def disable_adapters(model):
         yield
     finally:
         model.enable_adapter_layers()
+
+
+@contextmanager
+def padding_side(tokenizer, side: str):
+    """Context manager to temporarily override tokenizer padding side."""
+    original = tokenizer.padding_side
+    tokenizer.padding_side = side
+    try:
+        yield
+    finally:
+        tokenizer.padding_side = original
