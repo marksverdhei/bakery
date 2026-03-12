@@ -17,8 +17,6 @@ import logging
 import torch
 from typing import Optional, Callable
 
-logger = logging.getLogger(__name__)
-
 from datasets import Dataset
 from transformers import (
     Trainer,
@@ -30,6 +28,8 @@ from transformers import (
 from transformers.trainer_utils import EvalPrediction
 
 from bakery.kl import compute_kl_divergence, disable_adapters, padding_side
+
+logger = logging.getLogger(__name__)
 
 
 class PromptBakingTrainer(Trainer):
@@ -135,7 +135,9 @@ class PromptBakingTrainer(Trainer):
         responses = inputs.get("responses", [])
 
         if not user_messages or not responses:
-            logger.warning("Batch has no user_messages or responses — returning zero loss")
+            logger.warning(
+                "Batch has no user_messages or responses — returning zero loss"
+            )
             loss = torch.tensor(0.0, device=self.args.device)
             return (loss, None) if return_outputs else loss
 
@@ -143,7 +145,9 @@ class PromptBakingTrainer(Trainer):
             (msg, resp) for msg, resp in zip(user_messages, responses) if resp.strip()
         ]
         if not pairs:
-            logger.warning("All responses in batch are empty/whitespace — returning zero loss")
+            logger.warning(
+                "All responses in batch are empty/whitespace — returning zero loss"
+            )
             loss = torch.tensor(0.0, device=self.args.device)
             return (loss, None) if return_outputs else loss
 
