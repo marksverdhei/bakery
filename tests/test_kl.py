@@ -1,5 +1,6 @@
 import torch
-from bakery.kl import compute_kl_divergence
+from types import SimpleNamespace
+from bakery.kl import compute_kl_divergence, padding_side
 
 
 def test_kl_identical_distributions():
@@ -42,3 +43,22 @@ def test_kl_temperature_scaling():
     loss_t10 = compute_kl_divergence(teacher, student, mask, temperature=10.0)
 
     assert loss_t10.item() < loss_t1.item()
+
+
+def test_padding_side_context_manager():
+    """padding_side restores original value, even on exception."""
+    tok = SimpleNamespace(padding_side="right")
+    with padding_side(tok, "left"):
+        assert tok.padding_side == "left"
+    assert tok.padding_side == "right"
+
+
+def test_padding_side_restores_on_exception():
+    """padding_side restores original value after an exception."""
+    tok = SimpleNamespace(padding_side="right")
+    try:
+        with padding_side(tok, "left"):
+            raise RuntimeError("boom")
+    except RuntimeError:
+        pass
+    assert tok.padding_side == "right"

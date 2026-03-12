@@ -13,8 +13,11 @@ the prompt baking training loop:
 Based on the Prompt Baking paper (arxiv 2409.13697).
 """
 
+import logging
 import torch
 from typing import Optional, Callable
+
+logger = logging.getLogger(__name__)
 
 from datasets import Dataset
 from transformers import (
@@ -26,7 +29,7 @@ from transformers import (
 )
 from transformers.trainer_utils import EvalPrediction
 
-from bakery.kl import compute_kl_divergence, disable_adapters
+from bakery.kl import compute_kl_divergence, disable_adapters, padding_side
 
 
 class PromptBakingTrainer(Trainer):
@@ -132,6 +135,7 @@ class PromptBakingTrainer(Trainer):
         responses = inputs.get("responses", [])
 
         if not user_messages or not responses:
+            logger.warning("Batch has no user_messages or responses — returning zero loss")
             loss = torch.tensor(0.0, device=self.args.device)
             return (loss, None) if return_outputs else loss
 
@@ -139,6 +143,7 @@ class PromptBakingTrainer(Trainer):
             (msg, resp) for msg, resp in zip(user_messages, responses) if resp.strip()
         ]
         if not pairs:
+            logger.warning("All responses in batch are empty/whitespace — returning zero loss")
             loss = torch.tensor(0.0, device=self.args.device)
             return (loss, None) if return_outputs else loss
 
@@ -171,15 +176,13 @@ class PromptBakingTrainer(Trainer):
                 self._tokenize(s_prompt, return_tensors="pt")["input_ids"].shape[1]
             )
 
-        orig_padding_side = self.processing_class.padding_side
-        self.processing_class.padding_side = "left"
-        teacher_inputs = self._tokenize(
-            teacher_texts, return_tensors="pt", padding=True
-        ).to(model.device)
-        student_inputs = self._tokenize(
-            student_texts, return_tensors="pt", padding=True
-        ).to(model.device)
-        self.processing_class.padding_side = orig_padding_side
+        with padding_side(self.processing_class, "left"):
+            teacher_inputs = self._tokenize(
+                teacher_texts, return_tensors="pt", padding=True
+            ).to(model.device)
+            student_inputs = self._tokenize(
+                student_texts, return_tensors="pt", padding=True
+            ).to(model.device)
 
         with torch.no_grad():
             with disable_adapters(model):
@@ -208,6 +211,9 @@ class PromptBakingTrainer(Trainer):
             t_start = int(t_pad) + teacher_prompt_lengths[i]
             s_start = int(s_pad) + student_prompt_lengths[i]
 
+            # Logits at position t predict token t+1, so shift back by 1 to get
+            # the logits that correspond to each response token. Slice to -1
+            # because the last position predicts a token beyond the sequence.
             t_logits = teacher_outputs.logits[i : i + 1, t_start - 1 : -1, :]
             s_logits = student_outputs.logits[i : i + 1, s_start - 1 : -1, :]
 
@@ -228,6 +234,7 @@ class PromptBakingTrainer(Trainer):
             losses.append(loss)
 
         if not losses:
+            logger.warning("No aligned logit pairs after slicing — returning zero loss")
             zero = torch.tensor(0.0, device=self.args.device)
             return (zero, None) if return_outputs else zero
 
@@ -242,6 +249,15 @@ class PromptBakingTrainer(Trainer):
 
         user_messages = inputs.get("user_messages", [])
         all_user_messages, all_responses = [], []
+
+        if len(user_messages) * self.num_trajectories > 64:
+            logger.warning(
+                "Generating %d trajectories (%d prompts x %d each) — "
+                "consider reducing batch size or num_trajectories if OOM occurs",
+                len(user_messages) * self.num_trajectories,
+                len(user_messages),
+                self.num_trajectories,
+            )
 
         for user_msg in user_messages:
             for _ in range(self.num_trajectories):
