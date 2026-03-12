@@ -18,7 +18,7 @@ COPY src/ src/
 RUN uv pip install ".[qlora]"
 
 # Verify installation
-RUN python3 -c "import bakery; import torch; print(f'bakery OK, torch={torch.__version__}, cuda={torch.cuda.is_available()}')"
+RUN python3 -c "import bakery; import torch; print(f'bakery OK, torch={torch.__version__}, cuda_built={torch.version.cuda}')"
 
 # Default working directory for training runs
 WORKDIR /workspace
