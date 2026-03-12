@@ -254,7 +254,10 @@ class PromptBakingTrainer(Trainer):
         user_messages = inputs.get("user_messages", [])
         all_user_messages, all_responses = [], []
 
-        if len(user_messages) * self.num_trajectories > 64:
+        # Threshold beyond which memory usage from accumulated trajectories
+        # may become significant (each trajectory requires a full forward pass).
+        _TRAJECTORY_WARN_THRESHOLD = 64
+        if len(user_messages) * self.num_trajectories > _TRAJECTORY_WARN_THRESHOLD:
             logger.warning(
                 "Generating %d trajectories (%d prompts x %d each) — "
                 "consider reducing batch size or num_trajectories if OOM occurs",
@@ -271,6 +274,7 @@ class PromptBakingTrainer(Trainer):
                     all_responses.append(response)
 
         if not all_responses:
+            logger.warning("No valid trajectories generated — returning zero loss")
             return torch.tensor(0.0, device=self.args.device, requires_grad=True)
 
         inputs["user_messages"] = all_user_messages
