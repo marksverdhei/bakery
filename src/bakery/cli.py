@@ -26,8 +26,7 @@ from bakery.data import (
     load_corpus,
     build_system_prompt,
     load_training_prompts,
-    load_sft_dataset,
-    load_precomputed_responses,
+    load_dataset_pairs,
     load_eval_data,
 )
 from bakery.evaluate import evaluate_model
@@ -151,21 +150,14 @@ def main():
     # Create dataset
     print("\n[4] Training with KL divergence...")
     precomputed_responses = None
-    if data_config.sft_dataset:
-        pre_prompts, pre_responses = load_sft_dataset(
-            data_config.sft_dataset, data_config.sft_dataset_split
+    if data_config.dataset:
+        pre_prompts, pre_responses = load_dataset_pairs(
+            data_config.dataset, data_config.dataset_split
         )
         training_prompts = pre_prompts
         precomputed_responses = pre_responses
-        print(f"  Using SFT dataset: {data_config.sft_dataset}")
-        print(f"  Loaded {len(pre_responses)} (user, assistant) pairs")
-    elif data_config.precomputed_responses_file:
-        pre_prompts, pre_responses = load_precomputed_responses(
-            data_config.precomputed_responses_file
-        )
-        training_prompts = pre_prompts
-        precomputed_responses = pre_responses
-        print(f"  Using {len(pre_responses)} precomputed (prompt, response) pairs")
+        print(f"  Using dataset: {data_config.dataset}")
+        print(f"  Loaded {len(pre_responses)} (prompt, response) pairs")
     else:
         print(
             f"  Generating {baking_config.num_trajectories} trajectories per prompt on-the-fly"

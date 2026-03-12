@@ -108,32 +108,25 @@ class DataConfig:
         metadata={"help": "Use double quantization for 4-bit."},
     )
 
-    # Training data sources (mutually exclusive)
+    # Training data — provide ONE of these
     training_prompts_file: Optional[str] = field(
         default=None,
-        metadata={"help": "Path to JSON file with training prompts."},
+        metadata={"help": "Path to JSON file with training prompts (on-the-fly generation)."},
     )
     training_prompts: Optional[List[str]] = field(
         default=None,
-        metadata={"help": "Direct list of training prompts."},
+        metadata={"help": "Direct list of training prompts (on-the-fly generation)."},
     )
-    precomputed_responses_file: Optional[str] = field(
+    dataset: Optional[str] = field(
         default=None,
         metadata={
-            "help": "Path to JSON with precomputed (prompt, response) pairs. "
-            "Skips on-the-fly trajectory generation."
+            "help": "Precomputed (prompt, response) pairs. Accepts a local JSON file path "
+            "or a HuggingFace dataset ID (auto-detected). Skips trajectory generation."
         },
     )
-    sft_dataset: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": "HuggingFace dataset ID with chat conversations (messages format). "
-            "Each assistant turn becomes a (user, response) training pair."
-        },
-    )
-    sft_dataset_split: str = field(
+    dataset_split: str = field(
         default="train",
-        metadata={"help": "Dataset split to use."},
+        metadata={"help": "Dataset split to use (only for HuggingFace datasets)."},
     )
 
     # Evaluation

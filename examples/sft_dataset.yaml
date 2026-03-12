@@ -40,6 +40,6 @@ target_modules:
   - o_proj
 lora_dropout: 0.05
 
-# --- Data: HuggingFace chat dataset ---
-sft_dataset: "HuggingFaceH4/ultrachat_200k"
-sft_dataset_split: "train_sft[:1000]"
+# --- Data: HuggingFace chat dataset or local JSON file ---
+dataset: "HuggingFaceH4/ultrachat_200k"
+dataset_split: "train_sft[:1000]"

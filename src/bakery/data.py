@@ -124,42 +124,33 @@ def load_training_prompts(data_config: DataConfig) -> List[str]:
     )
 
 
-def load_sft_dataset(
-    dataset_id: str, split: str = "train"
+def load_dataset_pairs(
+    source: str, split: str = "train"
 ) -> Tuple[List[str], List[str]]:
-    """Load (user, assistant) pairs from a HuggingFace chat dataset.
+    """Load precomputed (prompt, response) pairs from a local JSON file or HF dataset.
 
-    Expects rows with a 'messages' field containing a list of
-    {"role": "user"|"assistant", "content": "..."} dicts.
-    """
-    from datasets import load_dataset
+    Auto-detects the source type: if the path exists on disk it's treated as a
+    local JSON file, otherwise it's loaded as a HuggingFace dataset.
 
-    ds = load_dataset(dataset_id, split=split)
-    prompts, responses = [], []
-
-    for row in ds:
-        messages = row.get("messages", [])
-        for i, msg in enumerate(messages):
-            if msg["role"] == "assistant" and msg.get("content", "").strip():
-                user_msg = ""
-                for j in range(i - 1, -1, -1):
-                    if messages[j]["role"] == "user":
-                        user_msg = messages[j]["content"]
-                        break
-                if user_msg:
-                    prompts.append(user_msg)
-                    responses.append(msg["content"])
-
-    return prompts, responses
-
-
-def load_precomputed_responses(path: str) -> Tuple[List[str], List[str]]:
-    """Load precomputed (prompt, response) pairs from JSON file.
-
-    Supported formats:
+    Local JSON formats:
         - [{"prompt": ..., "response": ...}, ...]
         - {"pairs": [{"prompt": ..., "response": ...}]}
+
+    HF dataset format:
+        Rows with a 'messages' field containing chat-style dicts.
+        Each assistant turn is paired with its preceding user message.
+
+    Returns:
+        (prompts, responses) tuple of parallel lists.
     """
+    import os
+
+    if os.path.exists(source):
+        return _load_json_pairs(source)
+    return _load_hf_pairs(source, split)
+
+
+def _load_json_pairs(path: str) -> Tuple[List[str], List[str]]:
     with open(path) as f:
         data = json.load(f)
 
@@ -176,6 +167,30 @@ def load_precomputed_responses(path: str) -> Tuple[List[str], List[str]]:
         if p and r:
             prompts.append(p)
             responses.append(r)
+
+    return prompts, responses
+
+
+def _load_hf_pairs(
+    dataset_id: str, split: str = "train"
+) -> Tuple[List[str], List[str]]:
+    from datasets import load_dataset as hf_load_dataset
+
+    ds = hf_load_dataset(dataset_id, split=split)
+    prompts, responses = [], []
+
+    for row in ds:
+        messages = row.get("messages", [])
+        for i, msg in enumerate(messages):
+            if msg["role"] == "assistant" and msg.get("content", "").strip():
+                user_msg = ""
+                for j in range(i - 1, -1, -1):
+                    if messages[j]["role"] == "user":
+                        user_msg = messages[j]["content"]
+                        break
+                if user_msg:
+                    prompts.append(user_msg)
+                    responses.append(msg["content"])
 
     return prompts, responses
 

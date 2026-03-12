@@ -17,13 +17,12 @@ The training objective minimizes per-token KL divergence between teacher and stu
 
 ## Data sources
 
-Bakery supports three ways to provide training data:
+Bakery supports two modes for training data:
 
 | Mode | Config field | Description |
 |------|-------------|-------------|
 | **On-the-fly** | `training_prompts` / `training_prompts_file` | Teacher generates trajectories during training |
-| **Precomputed** | `precomputed_responses_file` | Use pre-generated (prompt, response) pairs |
-| **SFT dataset** | `sft_dataset` | Pull (user, assistant) pairs from any HF chat dataset |
+| **Precomputed** | `dataset` | Provide (prompt, response) pairs from a local JSON file or HF dataset (auto-detected) |
 
 ## Install
 
