@@ -40,3 +40,57 @@ def test_load_corpus_list():
         assert "fact two" in result
     finally:
         os.unlink(path)
+
+
+def test_load_corpus_text_string():
+    """text format with a bare JSON string."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        json.dump("This is the full corpus text.", f)
+        path = f.name
+    try:
+        data = DataConfig(corpus_file=path, corpus_format="text")
+        result = load_corpus(data)
+        assert result == "This is the full corpus text."
+    finally:
+        os.unlink(path)
+
+
+def test_load_corpus_text_dict():
+    """text format with {"text": "..."}."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        json.dump({"text": "corpus from dict"}, f)
+        path = f.name
+    try:
+        data = DataConfig(corpus_file=path, corpus_format="text")
+        result = load_corpus(data)
+        assert result == "corpus from dict"
+    finally:
+        os.unlink(path)
+
+
+def test_load_corpus_text_dict_missing_key():
+    """text format with a dict that has no 'text' key returns empty string."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        json.dump({"other_key": "value"}, f)
+        path = f.name
+    try:
+        data = DataConfig(corpus_file=path, corpus_format="text")
+        result = load_corpus(data)
+        assert result == ""
+    finally:
+        os.unlink(path)
+
+
+def test_load_corpus_custom_fallback():
+    """Unknown format falls back to json.dumps of the raw data."""
+    payload = {"custom_field": "custom_value", "nested": [1, 2, 3]}
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        json.dump(payload, f)
+        path = f.name
+    try:
+        data = DataConfig(corpus_file=path, corpus_format="custom")
+        result = load_corpus(data)
+        parsed = json.loads(result)
+        assert parsed == payload
+    finally:
+        os.unlink(path)

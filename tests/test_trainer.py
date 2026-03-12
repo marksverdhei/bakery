@@ -1,0 +1,152 @@
+"""Tests for PromptBakingTrainer using a tiny GPT-2 model with LoRA."""
+
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import LoraConfig as PeftLoraConfig, get_peft_model
+
+from bakery.config import BakeryConfig
+from bakery.data import create_dataset, prompt_baking_collator
+from bakery.trainer import PromptBakingTrainer
+
+
+CHAT_TEMPLATE = (
+    "{% for m in messages %}"
+    "{{ m['role'] }}: {{ m['content'] }}\n"
+    "{% endfor %}"
+    "{% if add_generation_prompt %}assistant: {% endif %}"
+)
+
+
+def _make_trainer(prompts, responses=None, batch_size=1):
+    """Create a PromptBakingTrainer with tiny GPT-2 + LoRA for testing."""
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.chat_template = CHAT_TEMPLATE
+
+    model = AutoModelForCausalLM.from_pretrained("gpt2")
+    peft_config = PeftLoraConfig(
+        r=4,
+        lora_alpha=8,
+        target_modules=["c_attn"],
+        task_type="CAUSAL_LM",
+    )
+    model = get_peft_model(model, peft_config)
+
+    args = BakeryConfig(
+        output_dir="/tmp/bakery_test",
+        system_prompt="You are a helpful assistant.",
+        num_trajectories=1,
+        trajectory_length=16,
+        per_device_train_batch_size=batch_size,
+        num_train_epochs=1,
+        logging_steps=1,
+        report_to="none",
+        use_cpu=True,
+    )
+
+    dataset = create_dataset(prompts, responses)
+
+    trainer = PromptBakingTrainer(
+        model=model,
+        args=args,
+        train_dataset=dataset,
+        processing_class=tokenizer,
+        data_collator=prompt_baking_collator,
+    )
+    return trainer
+
+
+def test_compute_loss_returns_scalar():
+    """compute_loss returns a scalar tensor with gradient."""
+    trainer = _make_trainer(
+        prompts=["What is 2+2?"],
+        responses=["The answer is 4."],
+    )
+    inputs = {
+        "user_messages": ["What is 2+2?"],
+        "responses": ["The answer is 4."],
+    }
+    loss = trainer.compute_loss(trainer.model, inputs)
+    assert loss.dim() == 0
+    assert loss.requires_grad
+    assert loss.item() > 0
+
+
+def test_compute_loss_empty_inputs():
+    """compute_loss returns zero for empty inputs."""
+    trainer = _make_trainer(prompts=["placeholder"], responses=["placeholder"])
+    loss = trainer.compute_loss(trainer.model, {"user_messages": [], "responses": []})
+    assert loss.item() == 0.0
+
+
+def test_compute_loss_empty_responses():
+    """compute_loss returns zero when all responses are whitespace."""
+    trainer = _make_trainer(prompts=["placeholder"], responses=["placeholder"])
+    loss = trainer.compute_loss(
+        trainer.model,
+        {"user_messages": ["hello"], "responses": ["   "]},
+    )
+    assert loss.item() == 0.0
+
+
+def test_compute_loss_batch():
+    """compute_loss handles multiple pairs in a batch (tests padding logic)."""
+    trainer = _make_trainer(
+        prompts=["Short question?", "A much longer and more detailed question here?"],
+        responses=[
+            "Short answer.",
+            "A longer and more detailed response to test padding.",
+        ],
+        batch_size=2,
+    )
+    inputs = {
+        "user_messages": [
+            "Short question?",
+            "A much longer and more detailed question here?",
+        ],
+        "responses": [
+            "Short answer.",
+            "A longer and more detailed response to test padding.",
+        ],
+    }
+    loss = trainer.compute_loss(trainer.model, inputs)
+    assert loss.dim() == 0
+    assert loss.requires_grad
+    assert loss.item() > 0
+
+
+def test_compute_loss_return_outputs():
+    """compute_loss with return_outputs=True returns (loss, None)."""
+    trainer = _make_trainer(
+        prompts=["What is AI?"],
+        responses=["AI is artificial intelligence."],
+    )
+    inputs = {
+        "user_messages": ["What is AI?"],
+        "responses": ["AI is artificial intelligence."],
+    }
+    result = trainer.compute_loss(trainer.model, inputs, return_outputs=True)
+    assert isinstance(result, tuple)
+    assert len(result) == 2
+    assert result[0].dim() == 0
+    assert result[1] is None
+
+
+def test_loss_is_differentiable():
+    """Loss can be backpropagated through to LoRA parameters."""
+    trainer = _make_trainer(
+        prompts=["Hello"],
+        responses=["Hi there!"],
+    )
+    inputs = {
+        "user_messages": ["Hello"],
+        "responses": ["Hi there!"],
+    }
+    loss = trainer.compute_loss(trainer.model, inputs)
+    loss.backward()
+
+    has_grad = False
+    for name, param in trainer.model.named_parameters():
+        if param.requires_grad and param.grad is not None:
+            has_grad = True
+            break
+    assert has_grad, "No LoRA parameters received gradients"
