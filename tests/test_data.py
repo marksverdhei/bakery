@@ -1,4 +1,8 @@
-from bakery.data import PromptBakingDataset, prompt_baking_collator
+import json
+import os
+import tempfile
+
+from bakery.data import PromptBakingDataset, prompt_baking_collator, load_dataset
 
 
 def test_dataset_creation():
@@ -34,3 +38,66 @@ def test_collator_handles_lists():
     batch = prompt_baking_collator(features)
     assert batch["user_messages"] == ["a", "b"]
     assert batch["responses"] == ["c", "d"]
+
+
+def test_load_json_prompts_only():
+    """List of strings → prompts only, no responses."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        json.dump(["What is AI?", "Explain gravity."], f)
+        path = f.name
+    try:
+        prompts, responses = load_dataset(path)
+        assert prompts == ["What is AI?", "Explain gravity."]
+        assert responses is None
+    finally:
+        os.unlink(path)
+
+
+def test_load_json_paired():
+    """List of dicts with prompt+response → paired data."""
+    data = [
+        {"prompt": "What is AI?", "response": "AI is..."},
+        {"prompt": "Explain gravity.", "response": "Gravity is..."},
+    ]
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        json.dump(data, f)
+        path = f.name
+    try:
+        prompts, responses = load_dataset(path)
+        assert prompts == ["What is AI?", "Explain gravity."]
+        assert responses == ["AI is...", "Gravity is..."]
+    finally:
+        os.unlink(path)
+
+
+def test_load_json_prompts_only_dicts():
+    """List of dicts with only prompt keys (no response) → prompts only."""
+    data = [
+        {"question": "What is AI?"},
+        {"question": "Explain gravity."},
+    ]
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        json.dump(data, f)
+        path = f.name
+    try:
+        prompts, responses = load_dataset(path)
+        assert prompts == ["What is AI?", "Explain gravity."]
+        assert responses is None
+    finally:
+        os.unlink(path)
+
+
+def test_load_json_wrapped():
+    """Nested format like {"pairs": [...]} → unwrapped correctly."""
+    data = {"pairs": [
+        {"prompt": "Hi", "response": "Hello"},
+    ]}
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        json.dump(data, f)
+        path = f.name
+    try:
+        prompts, responses = load_dataset(path)
+        assert prompts == ["Hi"]
+        assert responses == ["Hello"]
+    finally:
+        os.unlink(path)

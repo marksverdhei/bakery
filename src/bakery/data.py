@@ -90,109 +90,143 @@ def build_system_prompt(
     )
 
 
-def load_training_prompts(data_config: DataConfig) -> List[str]:
-    """Load training prompts from config."""
+def load_data(
+    data_config: DataConfig,
+) -> Tuple[List[str], Optional[List[str]]]:
+    """Load training data from config.
+
+    Returns:
+        (prompts, responses) where responses is None if only prompts are
+        available (triggering on-the-fly trajectory generation).
+    """
+    if data_config.dataset:
+        return load_dataset(data_config.dataset, data_config.dataset_split)
+
     if data_config.training_prompts:
-        return data_config.training_prompts
-
-    if data_config.training_prompts_file:
-        with open(data_config.training_prompts_file) as f:
-            data = json.load(f)
-
-        if isinstance(data, list):
-            if isinstance(data[0], str):
-                return data
-            elif isinstance(data[0], dict):
-                return [
-                    item.get("question", item.get("input", item.get("prompt", "")))
-                    for item in data
-                ]
-
-        if isinstance(data, dict):
-            for key in ["training_samples", "training_prompts", "prompts", "questions"]:
-                if key in data:
-                    items = data[key]
-                    if isinstance(items[0], str):
-                        return items
-                    return [
-                        item.get("question", item.get("input", "")) for item in items
-                    ]
+        return data_config.training_prompts, None
 
     raise ValueError(
-        "No training prompts configured. "
-        "Provide training_prompts or training_prompts_file."
+        "No training data configured. Provide 'dataset' or 'training_prompts'."
     )
 
 
-def load_dataset_pairs(
+def load_dataset(
     source: str, split: str = "train"
-) -> Tuple[List[str], List[str]]:
-    """Load precomputed (prompt, response) pairs from a local JSON file or HF dataset.
+) -> Tuple[List[str], Optional[List[str]]]:
+    """Load training data from a local JSON file or HuggingFace dataset.
 
-    Auto-detects the source type: if the path exists on disk it's treated as a
-    local JSON file, otherwise it's loaded as a HuggingFace dataset.
+    Auto-detects:
+    - Local file vs HF dataset (by checking if path exists on disk)
+    - Paired data (prompt+response) vs prompts-only
 
-    Local JSON formats:
-        - [{"prompt": ..., "response": ...}, ...]
-        - {"pairs": [{"prompt": ..., "response": ...}]}
+    Supported formats:
 
-    HF dataset format:
-        Rows with a 'messages' field containing chat-style dicts.
-        Each assistant turn is paired with its preceding user message.
+    Local JSON:
+        - ["prompt1", "prompt2", ...]                          → prompts only
+        - [{"prompt": ..., "response": ...}, ...]              → paired
+        - {"pairs": [{"prompt": ..., "response": ...}]}        → paired
+        - [{"question": ...}, ...]  (no response key)          → prompts only
+
+    HuggingFace dataset:
+        - Rows with 'messages' column (chat format)            → paired
+        - Rows with 'prompt'/'input'/'question' column         → prompts only
 
     Returns:
-        (prompts, responses) tuple of parallel lists.
+        (prompts, responses) where responses is None for prompts-only data.
     """
     import os
 
     if os.path.exists(source):
-        return _load_json_pairs(source)
-    return _load_hf_pairs(source, split)
+        return _load_json(source)
+    return _load_hf(source, split)
 
 
-def _load_json_pairs(path: str) -> Tuple[List[str], List[str]]:
+def _load_json(path: str) -> Tuple[List[str], Optional[List[str]]]:
     with open(path) as f:
         data = json.load(f)
 
+    # Unwrap nested containers
     if isinstance(data, dict):
-        for key in ("pairs", "data", "samples", "completions"):
+        for key in ("pairs", "data", "samples", "completions",
+                     "training_samples", "training_prompts", "prompts", "questions"):
             if key in data:
                 data = data[key]
                 break
 
+    # Plain list of strings → prompts only
+    if isinstance(data, list) and data and isinstance(data[0], str):
+        return data, None
+
+    # List of dicts → check if responses are present
     prompts, responses = [], []
+    has_responses = False
     for item in data:
-        p = item.get("prompt", item.get("user_message", item.get("input", "")))
+        p = item.get("prompt", item.get("user_message", item.get("input",
+            item.get("question", ""))))
         r = item.get("response", item.get("completion", item.get("output", "")))
-        if p and r:
+        if p:
             prompts.append(p)
             responses.append(r)
+            if r:
+                has_responses = True
 
-    return prompts, responses
+    if has_responses:
+        return prompts, responses
+    return prompts, None
 
 
-def _load_hf_pairs(
+def _load_hf(
     dataset_id: str, split: str = "train"
-) -> Tuple[List[str], List[str]]:
+) -> Tuple[List[str], Optional[List[str]]]:
     from datasets import load_dataset as hf_load_dataset
 
     ds = hf_load_dataset(dataset_id, split=split)
-    prompts, responses = [], []
+    columns = ds.column_names
 
-    for row in ds:
-        messages = row.get("messages", [])
-        for i, msg in enumerate(messages):
-            if msg["role"] == "assistant" and msg.get("content", "").strip():
-                user_msg = ""
-                for j in range(i - 1, -1, -1):
-                    if messages[j]["role"] == "user":
-                        user_msg = messages[j]["content"]
-                        break
-                if user_msg:
-                    prompts.append(user_msg)
-                    responses.append(msg["content"])
+    # Chat format with messages column → extract (user, assistant) pairs
+    if "messages" in columns:
+        prompts, responses = [], []
+        for row in ds:
+            messages = row["messages"]
+            for i, msg in enumerate(messages):
+                if msg["role"] == "assistant" and msg.get("content", "").strip():
+                    user_msg = ""
+                    for j in range(i - 1, -1, -1):
+                        if messages[j]["role"] == "user":
+                            user_msg = messages[j]["content"]
+                            break
+                    if user_msg:
+                        prompts.append(user_msg)
+                        responses.append(msg["content"])
+        return prompts, responses
 
-    return prompts, responses
+    # Find prompt column
+    prompt_col = None
+    for col in ("prompt", "input", "question", "text", "instruction"):
+        if col in columns:
+            prompt_col = col
+            break
+
+    if prompt_col is None:
+        raise ValueError(
+            f"Cannot find prompt column in dataset '{dataset_id}'. "
+            f"Available columns: {columns}"
+        )
+
+    # Check for response column
+    response_col = None
+    for col in ("response", "completion", "output", "answer", "target"):
+        if col in columns:
+            response_col = col
+            break
+
+    prompts = [row[prompt_col] for row in ds if row[prompt_col]]
+
+    if response_col:
+        responses = [row[response_col] for row in ds if row[prompt_col]]
+        return prompts, responses
+
+    return prompts, None
 
 
 def load_eval_data(eval_file: Optional[str]) -> List[Tuple[str, List[str]]]:

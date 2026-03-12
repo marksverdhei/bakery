@@ -25,8 +25,7 @@ from bakery.data import (
     prompt_baking_collator,
     load_corpus,
     build_system_prompt,
-    load_training_prompts,
-    load_dataset_pairs,
+    load_data,
     load_eval_data,
 )
 from bakery.evaluate import evaluate_model
@@ -63,7 +62,7 @@ def main():
     baking_config.system_prompt = system_prompt
 
     # Load data
-    training_prompts = load_training_prompts(data_config)
+    training_prompts, precomputed_responses = load_data(data_config)
     eval_qa = load_eval_data(data_config.eval_file)
     heldout_qa = load_eval_data(data_config.heldout_file)
 
@@ -72,6 +71,10 @@ def main():
     print("=" * 70)
     print(f"  System prompt: {len(system_prompt):,} chars")
     print(f"  Training prompts: {len(training_prompts)}")
+    if precomputed_responses:
+        print(f"  Precomputed responses: {len(precomputed_responses)}")
+    else:
+        print(f"  Mode: on-the-fly trajectory generation")
     if eval_qa:
         print(f"  Evaluation Q&A: {len(eval_qa)}")
     if heldout_qa:
@@ -149,15 +152,8 @@ def main():
 
     # Create dataset
     print("\n[4] Training with KL divergence...")
-    precomputed_responses = None
-    if data_config.dataset:
-        pre_prompts, pre_responses = load_dataset_pairs(
-            data_config.dataset, data_config.dataset_split
-        )
-        training_prompts = pre_prompts
-        precomputed_responses = pre_responses
-        print(f"  Using dataset: {data_config.dataset}")
-        print(f"  Loaded {len(pre_responses)} (prompt, response) pairs")
+    if precomputed_responses:
+        print(f"  Using {len(precomputed_responses)} precomputed (prompt, response) pairs")
     else:
         print(
             f"  Generating {baking_config.num_trajectories} trajectories per prompt on-the-fly"

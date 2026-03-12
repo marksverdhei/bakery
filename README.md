@@ -17,12 +17,14 @@ The training objective minimizes per-token KL divergence between teacher and stu
 
 ## Data sources
 
-Bakery supports two modes for training data:
+The `dataset` field accepts a local JSON file or a HuggingFace dataset ID (auto-detected). The format determines the training mode:
 
-| Mode | Config field | Description |
-|------|-------------|-------------|
-| **On-the-fly** | `training_prompts` / `training_prompts_file` | Teacher generates trajectories during training |
-| **Precomputed** | `dataset` | Provide (prompt, response) pairs from a local JSON file or HF dataset (auto-detected) |
+| Data format | Training mode |
+|-------------|--------------|
+| Prompts only (list of strings, prompt-only columns) | On-the-fly trajectory generation from teacher |
+| Paired data (prompt+response, chat messages) | Train directly on precomputed pairs |
+
+You can also use `training_prompts` for inline prompt lists in YAML.
 
 ## Install
 

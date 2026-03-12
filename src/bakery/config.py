@@ -109,24 +109,22 @@ class DataConfig:
     )
 
     # Training data — provide ONE of these
-    training_prompts_file: Optional[str] = field(
-        default=None,
-        metadata={"help": "Path to JSON file with training prompts (on-the-fly generation)."},
-    )
-    training_prompts: Optional[List[str]] = field(
-        default=None,
-        metadata={"help": "Direct list of training prompts (on-the-fly generation)."},
-    )
     dataset: Optional[str] = field(
         default=None,
         metadata={
-            "help": "Precomputed (prompt, response) pairs. Accepts a local JSON file path "
-            "or a HuggingFace dataset ID (auto-detected). Skips trajectory generation."
+            "help": "Training data source: a local JSON file or HuggingFace dataset ID. "
+            "Auto-detects format. Datasets with responses (messages, prompt+response "
+            "pairs) skip trajectory generation. Datasets with only prompts use "
+            "on-the-fly generation from the teacher."
         },
     )
     dataset_split: str = field(
         default="train",
         metadata={"help": "Dataset split to use (only for HuggingFace datasets)."},
+    )
+    training_prompts: Optional[List[str]] = field(
+        default=None,
+        metadata={"help": "Inline list of training prompts (on-the-fly generation)."},
     )
 
     # Evaluation
