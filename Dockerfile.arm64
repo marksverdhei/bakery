@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 
 LABEL maintainer="marksverdhei"
 LABEL description="Bakery — Where LLMs go to get baked (ARM64/DGX)"
@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install uv for fast dependency management
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Install PyTorch with CUDA support
+# Install PyTorch (CUDA libs already in base image)
 RUN uv pip install torch --index-url https://download.pytorch.org/whl/cu128
 
 # Install bakery and all dependencies
