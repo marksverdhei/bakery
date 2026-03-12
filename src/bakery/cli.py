@@ -5,8 +5,8 @@ Usage:
     bakery --config config.yaml --num_train_epochs 5 --learning_rate 1e-4
 """
 
+import argparse
 import os
-import sys
 import json
 import torch
 
@@ -38,50 +38,51 @@ DTYPE_MAP = {
 
 
 def main():
+    # Pre-parse --config and collect remaining args for HfArgumentParser.
+    # argparse handles -h/--help and validates --config before we proceed.
+    pre_parser = argparse.ArgumentParser(
+        prog="bakery",
+        description="Bakery - prompt baking via KL divergence distillation with LoRA.",
+        epilog=(
+            "All TrainingArguments fields can be passed as CLI overrides on top of "
+            "the YAML config. See examples/ for sample configs."
+        ),
+    )
+    pre_parser.add_argument(
+        "--config",
+        required=True,
+        metavar="FILE",
+        help="path to YAML config file",
+    )
+    pre_args, remaining_args = pre_parser.parse_known_args()
+    config_file = pre_args.config
+
     parser = HfArgumentParser((BakeryConfig, DataConfig, LoraConfig))
 
-    config_file = None
-    remaining_args = []
-    argv = sys.argv[1:]
-    i = 0
-    while i < len(argv):
-        if argv[i] == "--config" and i + 1 < len(argv):
-            config_file = argv[i + 1]
-            i += 2
-        elif argv[i].startswith("--config="):
-            config_file = argv[i].split("=", 1)[1]
-            i += 1
-        else:
-            remaining_args.append(argv[i])
-            i += 1
-
-    if config_file:
-        baking_config, data_config, lora_config = parser.parse_yaml_file(
-            config_file, allow_extra_keys=True
+    baking_config, data_config, lora_config = parser.parse_yaml_file(
+        config_file, allow_extra_keys=True
+    )
+    # Apply CLI overrides on top of YAML config.
+    # We parse the remaining CLI args into fresh dataclasses, then detect
+    # which fields were explicitly set by comparing against a baseline
+    # (dataclasses parsed with no args at all).
+    if remaining_args:
+        override_parser = HfArgumentParser((BakeryConfig, DataConfig, LoraConfig))
+        baseline = override_parser.parse_args_into_dataclasses(
+            args=["--output_dir", baking_config.output_dir]
         )
-        # Apply CLI overrides on top of YAML config.
-        # We parse the remaining CLI args into fresh dataclasses, then detect
-        # which fields were explicitly set by comparing against a baseline
-        # (dataclasses parsed with no args at all).
-        if remaining_args:
-            override_parser = HfArgumentParser((BakeryConfig, DataConfig, LoraConfig))
-            baseline = override_parser.parse_args_into_dataclasses(
-                args=["--output_dir", baking_config.output_dir]
-            )
-            overrides = override_parser.parse_args_into_dataclasses(
-                args=["--output_dir", baking_config.output_dir] + remaining_args,
-                return_remaining_strings=True,
-            )
-            for override_cfg, baseline_cfg, base_cfg in zip(
-                overrides[:3],
-                baseline,
-                (baking_config, data_config, lora_config),
-            ):
-                for k, v in vars(override_cfg).items():
-                    if v != getattr(baseline_cfg, k):
-                        setattr(base_cfg, k, v)
-    else:
-        baking_config, data_config, lora_config = parser.parse_args_into_dataclasses()
+        overrides = override_parser.parse_args_into_dataclasses(
+            args=["--output_dir", baking_config.output_dir] + remaining_args,
+            return_remaining_strings=True,
+        )
+        for override_cfg, baseline_cfg, base_cfg in zip(
+            overrides[:3],
+            baseline,
+            (baking_config, data_config, lora_config),
+        ):
+            for k, v in vars(override_cfg).items():
+                if v != getattr(baseline_cfg, k):
+                    setattr(base_cfg, k, v)
 
     # Build system prompt
     corpus = load_corpus(data_config)
