@@ -92,7 +92,7 @@ class DataConfig:
         metadata={"help": "Model dtype: float32, float16, bfloat16."},
     )
     trust_remote_code: bool = field(
-        default=True,
+        default=False,
         metadata={"help": "Trust remote code when loading model."},
     )
     load_in_4bit: bool = field(

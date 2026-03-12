@@ -132,14 +132,14 @@ class PromptBakingTrainer(Trainer):
         responses = inputs.get("responses", [])
 
         if not user_messages or not responses:
-            loss = torch.tensor(0.0, device=model.device, requires_grad=True)
+            loss = torch.tensor(0.0, device=self.args.device)
             return (loss, None) if return_outputs else loss
 
         pairs = [
             (msg, resp) for msg, resp in zip(user_messages, responses) if resp.strip()
         ]
         if not pairs:
-            loss = torch.tensor(0.0, device=model.device, requires_grad=True)
+            loss = torch.tensor(0.0, device=self.args.device)
             return (loss, None) if return_outputs else loss
 
         teacher_texts, student_texts = [], []
@@ -171,32 +171,29 @@ class PromptBakingTrainer(Trainer):
                 self._tokenize(s_prompt, return_tensors="pt")["input_ids"].shape[1]
             )
 
+        orig_padding_side = self.processing_class.padding_side
+        self.processing_class.padding_side = "left"
         teacher_inputs = self._tokenize(
             teacher_texts, return_tensors="pt", padding=True
         ).to(model.device)
         student_inputs = self._tokenize(
             student_texts, return_tensors="pt", padding=True
         ).to(model.device)
-
-        teacher_token_type_ids = torch.zeros_like(teacher_inputs["input_ids"])
-        student_token_type_ids = torch.zeros_like(student_inputs["input_ids"])
+        self.processing_class.padding_side = orig_padding_side
 
         with torch.no_grad():
             with disable_adapters(model):
                 teacher_outputs = model(
                     input_ids=teacher_inputs["input_ids"],
                     attention_mask=teacher_inputs["attention_mask"],
-                    token_type_ids=teacher_token_type_ids,
                 )
 
         student_outputs = model(
             input_ids=student_inputs["input_ids"],
             attention_mask=student_inputs["attention_mask"],
-            token_type_ids=student_token_type_ids,
         )
 
-        total_loss = torch.tensor(0.0, device=model.device, requires_grad=True)
-        count = 0
+        losses = []
 
         for i in range(len(pairs)):
             t_start = teacher_prompt_lengths[i]
@@ -219,12 +216,13 @@ class PromptBakingTrainer(Trainer):
             loss = compute_kl_divergence(
                 t_logits.detach(), s_logits, mask, self.kl_temperature
             )
-            total_loss = total_loss + loss
-            count += 1
+            losses.append(loss)
 
-        if count > 0:
-            total_loss = total_loss / count
+        if not losses:
+            zero = torch.tensor(0.0, device=self.args.device)
+            return (zero, None) if return_outputs else zero
 
+        total_loss = torch.stack(losses).mean()
         return (total_loss, None) if return_outputs else total_loss
 
     def training_step(self, model, inputs, num_items_in_batch=None) -> torch.Tensor:
@@ -244,7 +242,7 @@ class PromptBakingTrainer(Trainer):
                     all_responses.append(response)
 
         if not all_responses:
-            return torch.tensor(0.0, device=model.device, requires_grad=True)
+            return torch.tensor(0.0, device=self.args.device, requires_grad=True)
 
         inputs["user_messages"] = all_user_messages
         inputs["responses"] = all_responses

@@ -21,7 +21,7 @@ from peft import LoraConfig as PeftLoraConfig, get_peft_model
 from bakery.config import BakeryConfig, DataConfig, LoraConfig
 from bakery.trainer import PromptBakingTrainer
 from bakery.data import (
-    PromptBakingDataset,
+    create_dataset,
     prompt_baking_collator,
     load_corpus,
     build_system_prompt,
@@ -41,18 +41,37 @@ def main():
     parser = HfArgumentParser((BakeryConfig, DataConfig, LoraConfig))
 
     config_file = None
-    for i, arg in enumerate(sys.argv[1:]):
-        if arg == "--config" and i + 1 < len(sys.argv) - 1:
-            config_file = sys.argv[i + 2]
-            break
-        if arg.startswith("--config="):
-            config_file = arg.split("=", 1)[1]
-            break
+    remaining_args = []
+    argv = sys.argv[1:]
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--config" and i + 1 < len(argv):
+            config_file = argv[i + 1]
+            i += 2
+        elif argv[i].startswith("--config="):
+            config_file = argv[i].split("=", 1)[1]
+            i += 1
+        else:
+            remaining_args.append(argv[i])
+            i += 1
 
     if config_file:
         baking_config, data_config, lora_config = parser.parse_yaml_file(
             config_file, allow_extra_keys=True
         )
+        # Apply CLI overrides on top of YAML config
+        if remaining_args:
+            override_parser = HfArgumentParser((BakeryConfig, DataConfig, LoraConfig))
+            overrides = override_parser.parse_args_into_dataclasses(
+                args=remaining_args, return_remaining_strings=True
+            )
+            for override_cfg, base_cfg in zip(
+                overrides[:3], (baking_config, data_config, lora_config)
+            ):
+                for k, v in vars(override_cfg).items():
+                    default = type(base_cfg).__dataclass_fields__.get(k)
+                    if default is not None and v != default.default:
+                        setattr(base_cfg, k, v)
     else:
         baking_config, data_config, lora_config = parser.parse_args_into_dataclasses()
 
@@ -167,7 +186,7 @@ def main():
             f"  Generating {baking_config.num_trajectories} trajectories per prompt on-the-fly"
         )
 
-    train_dataset = PromptBakingDataset(training_prompts, precomputed_responses)
+    train_dataset = create_dataset(training_prompts, precomputed_responses)
 
     trainer = PromptBakingTrainer(
         model=model,

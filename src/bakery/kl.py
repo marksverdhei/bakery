@@ -25,6 +25,8 @@ def compute_kl_divergence(
     teacher_probs = F.softmax(teacher_logits / temperature, dim=-1)
     student_log_probs = F.log_softmax(student_logits / temperature, dim=-1)
 
+    # F.kl_div(input, target) computes D_KL(target || input), i.e. forward KL
+    # from teacher to student — matching the prompt baking paper (2409.13697).
     kl_per_token = F.kl_div(
         student_log_probs, teacher_probs, reduction="none", log_target=False
     ).sum(dim=-1)

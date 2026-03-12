@@ -2,12 +2,12 @@ import json
 import os
 import tempfile
 
-from bakery.data import PromptBakingDataset, prompt_baking_collator, load_dataset
+from bakery.data import create_dataset, prompt_baking_collator, load_dataset
 
 
 def test_dataset_creation():
     prompts = ["hello", "world"]
-    ds = PromptBakingDataset(prompts)
+    ds = create_dataset(prompts)
     assert len(ds) == 2
     assert ds[0]["user_messages"] == "hello"
     assert "responses" not in ds.column_names
@@ -16,7 +16,7 @@ def test_dataset_creation():
 def test_dataset_with_responses():
     prompts = ["hello", "world"]
     responses = ["hi there", "earth"]
-    ds = PromptBakingDataset(prompts, responses)
+    ds = create_dataset(prompts, responses)
     assert len(ds) == 2
     assert ds[0]["responses"] == "hi there"
 

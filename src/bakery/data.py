@@ -8,7 +8,7 @@ from datasets import Dataset
 from bakery.config import BakeryConfig, DataConfig
 
 
-def PromptBakingDataset(
+def create_dataset(
     prompts: List[str],
     responses: Optional[List[str]] = None,
 ) -> Dataset:
@@ -230,10 +230,14 @@ def _load_hf(
             response_col = col
             break
 
-    prompts = [row[prompt_col] for row in ds if row[prompt_col]]
+    prompts, responses = [], []
+    for row in ds:
+        if row[prompt_col]:
+            prompts.append(row[prompt_col])
+            if response_col:
+                responses.append(row[response_col])
 
     if response_col:
-        responses = [row[response_col] for row in ds if row[prompt_col]]
         return prompts, responses
 
     return prompts, None

@@ -26,6 +26,7 @@ def evaluate_model(
     if not qa_pairs:
         return {"accuracy": 0, "correct": 0, "total": 0, "results": []}
 
+    was_training = model.training
     model.eval()
     correct = 0
     results = []
@@ -72,6 +73,9 @@ def evaluate_model(
                 "correct": is_correct,
             }
         )
+
+    if was_training:
+        model.train()
 
     accuracy = correct / len(qa_pairs)
     print(f"  {desc}: {correct}/{len(qa_pairs)} ({accuracy * 100:.1f}%)")
