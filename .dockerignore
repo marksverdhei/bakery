@@ -1,0 +1,12 @@
+.git
+.github
+.pytest_cache
+__pycache__
+*.pyc
+*.egg-info
+.venv
+tests
+examples
+*.md
+!README.md
+prek.toml
