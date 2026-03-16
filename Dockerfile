@@ -7,6 +7,7 @@ LABEL org.opencontainers.image.source="https://github.com/marksverdhei/bakery"
 ENV PYTHONUNBUFFERED=1
 ENV UV_SYSTEM_PYTHON=1
 ENV UV_COMPILE_BYTECODE=1
+ENV UV_BREAK_SYSTEM_PACKAGES=1
 
 # Install uv for fast dependency management
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
