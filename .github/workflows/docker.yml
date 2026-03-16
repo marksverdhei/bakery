@@ -46,6 +46,7 @@ jobs:
           file: Dockerfile
           platforms: linux/amd64
           push: true
+          provenance: false
           tags: ${{ steps.meta-amd64.outputs.tags }}
           labels: ${{ steps.meta-amd64.outputs.labels }}
           cache-from: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache-amd64
@@ -68,6 +69,7 @@ jobs:
           file: Dockerfile.arm64
           platforms: linux/arm64
           push: true
+          provenance: false
           tags: ${{ steps.meta-arm64.outputs.tags }}
           labels: ${{ steps.meta-arm64.outputs.labels }}
           cache-from: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache-arm64
