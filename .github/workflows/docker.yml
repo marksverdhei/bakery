@@ -32,9 +32,12 @@ jobs:
             type=sha,prefix=
 
       - name: Build and push
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           docker build -t ${{ env.IMAGE_NAME }}:ci-build -f Dockerfile .
-          for tag in ${{ steps.meta.outputs.tags }}; do
+          echo "$TAGS" | while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
             docker tag ${{ env.IMAGE_NAME }}:ci-build "$tag"
             docker push "$tag"
           done
