@@ -67,21 +67,23 @@ def main():
     # which fields were explicitly set by comparing against a baseline
     # (dataclasses parsed with no args at all).
     if remaining_args:
+        # Collect which field names were explicitly passed on the CLI.
+        explicit_keys = set()
+        for arg in remaining_args:
+            if arg.startswith("--"):
+                explicit_keys.add(arg.lstrip("-").replace("-", "_"))
+
         override_parser = HfArgumentParser((BakeryConfig, DataConfig, LoraConfig))
-        baseline = override_parser.parse_args_into_dataclasses(
-            args=["--output_dir", baking_config.output_dir]
-        )
         overrides = override_parser.parse_args_into_dataclasses(
             args=["--output_dir", baking_config.output_dir] + remaining_args,
             return_remaining_strings=True,
         )
-        for override_cfg, baseline_cfg, base_cfg in zip(
+        for override_cfg, base_cfg in zip(
             overrides[:3],
-            baseline,
             (baking_config, data_config, lora_config),
         ):
             for k, v in vars(override_cfg).items():
-                if v != getattr(baseline_cfg, k):
+                if k in explicit_keys:
                     setattr(base_cfg, k, v)
 
     # Build system prompt
