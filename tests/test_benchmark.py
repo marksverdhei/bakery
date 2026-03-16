@@ -16,14 +16,13 @@ import tracemalloc
 
 import pytest
 import torch
-import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig as PeftLoraConfig, get_peft_model
 
 from bakery.config import BakeryConfig
 from bakery.data import create_dataset, prompt_baking_collator
 from bakery.trainer import PromptBakingTrainer
-from bakery.kl import compute_kl_divergence, disable_adapters, padding_side
+from bakery.kl import compute_kl_divergence, disable_adapters
 
 
 # ---------------------------------------------------------------------------
@@ -55,13 +54,13 @@ SAMPLE_RESPONSES = [
 # These are intentionally generous to avoid flaky failures; the goal is to
 # catch large regressions (e.g. 5x slowdowns), not micro-optimizations.
 BASELINES = {
-    "kl_divergence_single": 0.05,       # single KL computation
-    "forward_pass_teacher": 1.0,         # one forward pass, adapters disabled
-    "forward_pass_student": 1.0,         # one forward pass, adapters enabled
-    "compute_loss_single": 3.0,          # single compute_loss call
-    "compute_loss_batch": 5.0,           # batched compute_loss call
-    "training_step_single": 8.0,         # single training_step (with generation)
-    "multi_step_3": 25.0,                # 3 training steps end-to-end
+    "kl_divergence_single": 0.05,  # single KL computation
+    "forward_pass_teacher": 1.0,  # one forward pass, adapters disabled
+    "forward_pass_student": 1.0,  # one forward pass, adapters enabled
+    "compute_loss_single": 3.0,  # single compute_loss call
+    "compute_loss_batch": 5.0,  # batched compute_loss call
+    "training_step_single": 8.0,  # single training_step (with generation)
+    "multi_step_3": 25.0,  # 3 training steps end-to-end
 }
 
 # Accumulates results across the test session for the summary.
@@ -71,6 +70,7 @@ _benchmark_results: list[dict] = []
 # ---------------------------------------------------------------------------
 # Factories
 # ---------------------------------------------------------------------------
+
 
 def _make_tokenizer():
     """Create a GPT-2 tokenizer configured for chat."""
@@ -141,6 +141,7 @@ def _record(name, elapsed, iterations=1, extra=None):
 # Benchmark tests
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.benchmark
 def test_bench_kl_divergence():
     """Measure raw KL divergence computation time."""
@@ -204,8 +205,7 @@ def test_bench_forward_pass_teacher():
         times.append(time.perf_counter() - t0)
 
     median = statistics.median(times)
-    _record("forward_pass_teacher", median, 1,
-            {"median_ms": median * 1000})
+    _record("forward_pass_teacher", median, 1, {"median_ms": median * 1000})
 
     assert median < BASELINES["forward_pass_teacher"], (
         f"Teacher forward pass took {median:.4f}s, "
@@ -236,8 +236,7 @@ def test_bench_forward_pass_student():
         times.append(time.perf_counter() - t0)
 
     median = statistics.median(times)
-    _record("forward_pass_student", median, 1,
-            {"median_ms": median * 1000})
+    _record("forward_pass_student", median, 1, {"median_ms": median * 1000})
 
     assert median < BASELINES["forward_pass_student"], (
         f"Student forward pass took {median:.4f}s, "
@@ -272,8 +271,12 @@ def test_bench_compute_loss_single():
         times.append(time.perf_counter() - t0)
 
     median = statistics.median(times)
-    _record("compute_loss_single", median, 1,
-            {"median_ms": median * 1000, "loss_value": loss.item()})
+    _record(
+        "compute_loss_single",
+        median,
+        1,
+        {"median_ms": median * 1000, "loss_value": loss.item()},
+    )
 
     assert median < BASELINES["compute_loss_single"], (
         f"compute_loss (single) took {median:.4f}s, "
@@ -310,11 +313,16 @@ def test_bench_compute_loss_batch():
 
     median = statistics.median(times)
     samples_per_sec = len(SAMPLE_PROMPTS) / median if median > 0 else float("inf")
-    _record("compute_loss_batch", median, 1, {
-        "median_ms": median * 1000,
-        "batch_size": len(SAMPLE_PROMPTS),
-        "samples_per_sec": samples_per_sec,
-    })
+    _record(
+        "compute_loss_batch",
+        median,
+        1,
+        {
+            "median_ms": median * 1000,
+            "batch_size": len(SAMPLE_PROMPTS),
+            "samples_per_sec": samples_per_sec,
+        },
+    )
 
     assert median < BASELINES["compute_loss_batch"], (
         f"compute_loss (batch=4) took {median:.4f}s, "
@@ -351,9 +359,14 @@ def test_bench_training_step_single():
     loss.backward()
     elapsed = time.perf_counter() - t0
 
-    _record("training_step_single", elapsed, 1, {
-        "elapsed_ms": elapsed * 1000,
-    })
+    _record(
+        "training_step_single",
+        elapsed,
+        1,
+        {
+            "elapsed_ms": elapsed * 1000,
+        },
+    )
 
     assert elapsed < BASELINES["training_step_single"], (
         f"training_step took {elapsed:.4f}s, "
@@ -389,10 +402,15 @@ def test_bench_multi_step():
 
     steps_per_sec = n_steps / elapsed
     samples_per_sec = (n_steps * 2) / elapsed
-    _record("multi_step_3", elapsed, n_steps, {
-        "steps_per_sec": steps_per_sec,
-        "samples_per_sec": samples_per_sec,
-    })
+    _record(
+        "multi_step_3",
+        elapsed,
+        n_steps,
+        {
+            "steps_per_sec": steps_per_sec,
+            "samples_per_sec": samples_per_sec,
+        },
+    )
 
     assert elapsed < BASELINES["multi_step_3"], (
         f"{n_steps} training steps took {elapsed:.4f}s, "
@@ -438,13 +456,14 @@ def test_bench_memory_tracking():
 
     # Sanity check: peak CPU memory should be under 2 GB for tiny GPT-2
     assert peak_mem / (1024 * 1024) < 2048, (
-        f"Peak CPU memory {peak_mem / (1024*1024):.1f} MB exceeds 2 GB limit"
+        f"Peak CPU memory {peak_mem / (1024 * 1024):.1f} MB exceeds 2 GB limit"
     )
 
 
 # ---------------------------------------------------------------------------
 # Summary (printed at session end)
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.benchmark
 def test_bench_print_summary():
@@ -457,9 +476,7 @@ def test_bench_print_summary():
     lines.append("=" * 80)
     lines.append("BENCHMARK SUMMARY")
     lines.append("=" * 80)
-    lines.append(
-        f"{'Test':<35} {'Time (ms)':>10} {'Throughput':>14} {'Status':>8}"
-    )
+    lines.append(f"{'Test':<35} {'Time (ms)':>10} {'Throughput':>14} {'Status':>8}")
     lines.append("-" * 80)
 
     for r in _benchmark_results:
