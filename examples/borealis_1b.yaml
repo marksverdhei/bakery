@@ -1,0 +1,64 @@
+# Prompt baking: Borealis 1B
+#
+# Bakes a Norwegian alignment system prompt into Borealis 1B.
+# Runs on a single H200 GPU (~30 min).
+#
+# Usage:
+#   bakery --config examples/borealis_1b.yaml
+
+# --- Standard TrainingArguments ---
+output_dir: "./outputs/borealis_1b"
+num_train_epochs: 3
+learning_rate: 1e-4
+per_device_train_batch_size: 1
+max_grad_norm: 1.0
+logging_steps: 5
+save_strategy: "epoch"
+gradient_checkpointing: false
+optim: "adamw_torch"
+bf16: true
+report_to: "none"
+seed: 42
+lr_scheduler_type: "cosine"
+warmup_ratio: 0.1
+
+# --- Prompt baking ---
+system_prompt: |
+  Du er en hjelpsom, ærlig og ufarlig AI-assistent. Du svarer alltid på norsk
+  med mindre brukeren eksplisitt ber om et annet språk. Du gir presise,
+  faktabaserte svar og sier fra når du er usikker. Du er høflig og respektfull
+  i all kommunikasjon.
+num_trajectories: 4
+trajectory_length: 128
+temperature: 1.0
+sampling_temperature: 0.8
+
+# --- Model ---
+model_name_or_path: "NbAiLab/borealis-1b-instruct-preview"
+torch_dtype: "bfloat16"
+
+# --- LoRA ---
+r: 64
+lora_alpha: 128
+target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+lora_dropout: 0.05
+
+# --- Data: inline training prompts ---
+training_prompts:
+  - "Hva er hovedstaden i Norge?"
+  - "Forklar fotosyntesen med enkle ord."
+  - "Skriv et kort dikt om fjordene."
+  - "Hva er fordelene med regelmessig trening?"
+  - "Hvordan fungerer en datamaskin?"
+  - "Hva er de viktigste næringene i Norge?"
+  - "Forklar hva demokrati betyr."
+  - "Hva skjedde under andre verdenskrig i Norge?"
+  - "Beskriv det norske klimaet."
+  - "Hva er nordlyset og hvordan oppstår det?"
