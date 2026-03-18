@@ -16,7 +16,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 WORKDIR /opt/bakery
 COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY src/ src/
-RUN uv pip install ".[qlora]"
+RUN uv pip install ".[qlora]" wandb flash-linear-attention
 
 # Verify installation
 RUN python3 -c "import bakery; import torch; print(f'bakery OK, torch={torch.__version__}, cuda_built={torch.version.cuda}')"
