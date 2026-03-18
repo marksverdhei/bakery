@@ -42,6 +42,12 @@ jobs:
             docker push "$tag"
           done
 
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rmi ${{ env.IMAGE_NAME }}:ci-build 2>/dev/null || true
+          docker image prune -f --filter "label=org.opencontainers.image.source=https://github.com/marksverdhei/bakery" --filter "until=72h" 2>/dev/null || true
+
   build-arm64:
     runs-on: [self-hosted, linux, x64]
     needs: build-amd64
@@ -82,3 +88,11 @@ jobs:
           provenance: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache-arm64
+          cache-to: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache-arm64,mode=max
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker buildx prune -f --filter "until=72h" 2>/dev/null || true
+          docker image prune -f --filter "until=72h" 2>/dev/null || true
