@@ -154,6 +154,7 @@ def main():
                 data_config.model_name_or_path, **cpu_kwargs
             )
             from accelerate import dispatch_model, infer_auto_device_map
+
             gpu_mem = torch.cuda.get_device_properties(0).total_memory
             device_map = infer_auto_device_map(
                 base_model,

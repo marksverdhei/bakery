@@ -210,9 +210,15 @@ class PromptBakingTrainer(Trainer):
         )
         # Some architectures (e.g. Gemma 3) require token_type_ids during training.
         # The tokenizer may not return them, so create zeros if the model expects them.
-        if hasattr(model.config, "model_type") and model.config.model_type in ("gemma3",):
-            teacher_fwd["token_type_ids"] = torch.zeros_like(teacher_inputs["input_ids"])
-            student_fwd["token_type_ids"] = torch.zeros_like(student_inputs["input_ids"])
+        if hasattr(model.config, "model_type") and model.config.model_type in (
+            "gemma3",
+        ):
+            teacher_fwd["token_type_ids"] = torch.zeros_like(
+                teacher_inputs["input_ids"]
+            )
+            student_fwd["token_type_ids"] = torch.zeros_like(
+                student_inputs["input_ids"]
+            )
         elif "token_type_ids" in teacher_inputs:
             teacher_fwd["token_type_ids"] = teacher_inputs["token_type_ids"]
             student_fwd["token_type_ids"] = student_inputs["token_type_ids"]

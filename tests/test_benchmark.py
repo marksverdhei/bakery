@@ -509,7 +509,8 @@ def _run_baseline_in_worktree(ref: str) -> dict:
                 "benchmark",
                 "-v",
                 "-s",
-                "-p", "no:cacheprovider",
+                "-p",
+                "no:cacheprovider",
             ],
             cwd=worktree_dir,
             capture_output=True,
@@ -632,9 +633,11 @@ def test_bench_print_summary(request):
     lines = []
     lines.append("")
     lines.append("=" * 95)
-    lines.append(f"BENCHMARK SUMMARY  (device: {DEVICE}"
-                 + (f", {torch.cuda.get_device_name(0)}" if USE_GPU else "")
-                 + ")")
+    lines.append(
+        f"BENCHMARK SUMMARY  (device: {DEVICE}"
+        + (f", {torch.cuda.get_device_name(0)}" if USE_GPU else "")
+        + ")"
+    )
     lines.append("=" * 95)
 
     if baseline_data:
@@ -643,9 +646,7 @@ def test_bench_print_summary(request):
             f"{'Delta':>16} {'Throughput':>14}"
         )
     else:
-        lines.append(
-            f"{'Test':<30} {'Time (ms)':>10} {'Throughput':>14} {'Status':>8}"
-        )
+        lines.append(f"{'Test':<30} {'Time (ms)':>10} {'Throughput':>14} {'Status':>8}")
     lines.append("-" * 95)
 
     for r in _benchmark_results:

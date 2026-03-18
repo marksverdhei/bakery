@@ -115,7 +115,9 @@ class DataConfig:
     )
     attn_implementation: Optional[str] = field(
         default=None,
-        metadata={"help": "Attention implementation: flash_attention_2, sdpa, eager, or None for default."},
+        metadata={
+            "help": "Attention implementation: flash_attention_2, sdpa, eager, or None for default."
+        },
     )
 
     # Training data — provide ONE of these
