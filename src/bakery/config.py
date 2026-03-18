@@ -113,6 +113,10 @@ class DataConfig:
         default=True,
         metadata={"help": "Use double quantization for 4-bit."},
     )
+    attn_implementation: Optional[str] = field(
+        default=None,
+        metadata={"help": "Attention implementation: flash_attention_2, sdpa, eager, or None for default."},
+    )
 
     # Training data — provide ONE of these
     dataset: Optional[str] = field(

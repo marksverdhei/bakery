@@ -10,6 +10,7 @@ def compute_kl_divergence(
     student_logits: torch.Tensor,
     mask: torch.Tensor,
     temperature: float = 1.0,
+    per_sample: bool = False,
 ) -> torch.Tensor:
     """Compute D_KL(P_teacher || P_student) per-token, masked and averaged.
 
@@ -18,9 +19,11 @@ def compute_kl_divergence(
         student_logits: [batch, seq_len, vocab_size]
         mask: [batch, seq_len] attention mask (1=real, 0=padding)
         temperature: Softening temperature for distributions
+        per_sample: If True, return per-sample averaged losses [batch]
+                    instead of a single scalar.
 
     Returns:
-        Scalar KL divergence loss.
+        Scalar KL divergence loss, or [batch] tensor if per_sample=True.
     """
     teacher_probs = F.softmax(teacher_logits / temperature, dim=-1)
     student_log_probs = F.log_softmax(student_logits / temperature, dim=-1)
@@ -32,6 +35,13 @@ def compute_kl_divergence(
     ).sum(dim=-1)
 
     masked_kl = kl_per_token * mask
+
+    if per_sample:
+        # Per-sample: average each sample's KL over its own unmasked tokens.
+        num_tokens = mask.sum(dim=-1)  # [batch]
+        safe_num = num_tokens.clamp(min=1.0)
+        return masked_kl.sum(dim=-1) / safe_num  # [batch]
+
     num_tokens = mask.sum()
     return masked_kl.sum() / num_tokens if num_tokens > 0 else masked_kl.sum()
 

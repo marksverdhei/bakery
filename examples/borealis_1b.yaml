@@ -36,6 +36,7 @@ sampling_temperature: 0.8
 # --- Model ---
 model_name_or_path: "NbAiLab/borealis-1b-instruct-preview"
 torch_dtype: "bfloat16"
+attn_implementation: "sdpa"
 
 # --- LoRA ---
 r: 64

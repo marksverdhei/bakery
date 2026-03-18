@@ -73,6 +73,8 @@ class PromptBakingTrainer(Trainer):
             optimizers=optimizers,
         )
 
+        self._prompt_length_cache: dict[str, tuple[int, int]] = {}
+
         self.model_accepts_loss_kwargs = False
         self.generation_config = GenerationConfig(
             max_new_tokens=self.trajectory_length,
@@ -86,6 +88,20 @@ class PromptBakingTrainer(Trainer):
 
     def _tokenize(self, text: str, **kwargs) -> dict:
         return self.processing_class(text, add_special_tokens=False, **kwargs)
+
+    def _get_prompt_lengths(self, user_message: str) -> tuple[int, int]:
+        """Return (teacher_prompt_length, student_prompt_length) for a user message.
+
+        Results are cached because prompt lengths are deterministic for a given
+        user_message (the system_prompt is constant across the trainer's lifetime).
+        """
+        if user_message not in self._prompt_length_cache:
+            t_prompt = self._format_prompted(user_message)
+            t_len = self._tokenize(t_prompt, return_tensors="pt")["input_ids"].shape[1]
+            s_prompt = self._format_unprompted(user_message)
+            s_len = self._tokenize(s_prompt, return_tensors="pt")["input_ids"].shape[1]
+            self._prompt_length_cache[user_message] = (t_len, s_len)
+        return self._prompt_length_cache[user_message]
 
     def _format_prompted(self, user_message: str) -> str:
         messages = [
@@ -163,10 +179,6 @@ class PromptBakingTrainer(Trainer):
             teacher_texts.append(
                 self.processing_class.apply_chat_template(t_msgs, tokenize=False)
             )
-            t_prompt = self._format_prompted(user_msg)
-            teacher_prompt_lengths.append(
-                self._tokenize(t_prompt, return_tensors="pt")["input_ids"].shape[1]
-            )
 
             s_msgs = [
                 {"role": "user", "content": user_msg},
@@ -175,10 +187,10 @@ class PromptBakingTrainer(Trainer):
             student_texts.append(
                 self.processing_class.apply_chat_template(s_msgs, tokenize=False)
             )
-            s_prompt = self._format_unprompted(user_msg)
-            student_prompt_lengths.append(
-                self._tokenize(s_prompt, return_tensors="pt")["input_ids"].shape[1]
-            )
+
+            t_len, s_len = self._get_prompt_lengths(user_msg)
+            teacher_prompt_lengths.append(t_len)
+            student_prompt_lengths.append(s_len)
 
         with padding_side(self.processing_class, "left"):
             teacher_inputs = self._tokenize(
@@ -188,17 +200,28 @@ class PromptBakingTrainer(Trainer):
                 student_texts, return_tensors="pt", padding=True
             ).to(model.device)
 
-        with torch.no_grad():
-            with disable_adapters(model):
-                teacher_outputs = model(
-                    input_ids=teacher_inputs["input_ids"],
-                    attention_mask=teacher_inputs["attention_mask"],
-                )
-
-        student_outputs = model(
+        teacher_fwd = dict(
+            input_ids=teacher_inputs["input_ids"],
+            attention_mask=teacher_inputs["attention_mask"],
+        )
+        student_fwd = dict(
             input_ids=student_inputs["input_ids"],
             attention_mask=student_inputs["attention_mask"],
         )
+        # Some architectures (e.g. Gemma 3) require token_type_ids during training.
+        # The tokenizer may not return them, so create zeros if the model expects them.
+        if hasattr(model.config, "model_type") and model.config.model_type in ("gemma3",):
+            teacher_fwd["token_type_ids"] = torch.zeros_like(teacher_inputs["input_ids"])
+            student_fwd["token_type_ids"] = torch.zeros_like(student_inputs["input_ids"])
+        elif "token_type_ids" in teacher_inputs:
+            teacher_fwd["token_type_ids"] = teacher_inputs["token_type_ids"]
+            student_fwd["token_type_ids"] = student_inputs["token_type_ids"]
+
+        with torch.no_grad():
+            with disable_adapters(model):
+                teacher_outputs = model(**teacher_fwd)
+
+        student_outputs = model(**student_fwd)
 
         # With left-padding, each sequence has leading pad tokens that shift
         # the real content rightward. Compute per-sequence padding offsets.

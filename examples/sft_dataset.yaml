@@ -29,6 +29,7 @@ temperature: 1.0
 # --- Model ---
 model_name_or_path: "Qwen/Qwen3-0.6B"
 torch_dtype: "bfloat16"
+attn_implementation: "sdpa"
 
 # --- LoRA ---
 r: 32

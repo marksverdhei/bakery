@@ -150,3 +150,43 @@ def test_loss_is_differentiable():
             has_grad = True
             break
     assert has_grad, "No LoRA parameters received gradients"
+
+
+def test_prompt_length_cache():
+    """Prompt lengths are cached and reused across compute_loss calls."""
+    trainer = _make_trainer(
+        prompts=["What is 2+2?"],
+        responses=["The answer is 4."],
+    )
+    assert len(trainer._prompt_length_cache) == 0
+
+    inputs = {
+        "user_messages": ["What is 2+2?"],
+        "responses": ["The answer is 4."],
+    }
+    trainer.compute_loss(trainer.model, inputs)
+    assert "What is 2+2?" in trainer._prompt_length_cache
+    t_len, s_len = trainer._prompt_length_cache["What is 2+2?"]
+    assert isinstance(t_len, int) and t_len > 0
+    assert isinstance(s_len, int) and s_len > 0
+
+    # Second call with same prompt should reuse cache (no new entries)
+    trainer.compute_loss(trainer.model, inputs)
+    assert len(trainer._prompt_length_cache) == 1
+
+
+def test_prompt_length_cache_multiple_prompts():
+    """Cache accumulates entries for different prompts."""
+    trainer = _make_trainer(
+        prompts=["Q1", "Q2"],
+        responses=["A1", "A2"],
+        batch_size=2,
+    )
+    inputs = {
+        "user_messages": ["Q1", "Q2"],
+        "responses": ["A1", "A2"],
+    }
+    trainer.compute_loss(trainer.model, inputs)
+    assert len(trainer._prompt_length_cache) == 2
+    assert "Q1" in trainer._prompt_length_cache
+    assert "Q2" in trainer._prompt_length_cache
