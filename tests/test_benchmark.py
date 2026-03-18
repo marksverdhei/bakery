@@ -454,6 +454,203 @@ def test_bench_memory_tracking():
 
 
 # ---------------------------------------------------------------------------
+# GPU benchmarks (Qwen 3.5 9B QLoRA, requires CUDA)
+# ---------------------------------------------------------------------------
+
+# Target: ~18-20 GB VRAM on RTX 3090.
+# flash-linear-attention + causal-conv1d are auto-installed if missing.
+# batch=2 with long responses accounts for double forward pass (teacher + student).
+GPU_MODEL = "Qwen/Qwen3.5-9B"
+GPU_BATCH_SIZE = 2
+
+_GPU_PROMPTS = [
+    "Write a detailed essay about the history of artificial intelligence, "
+    "covering its origins in the 1950s, the AI winters, the rise of machine "
+    "learning, deep learning breakthroughs, and modern large language models. "
+    "Include key figures, milestones, and the societal implications of each era.",
+] * GPU_BATCH_SIZE
+
+_GPU_RESPONSES = [
+    "Artificial intelligence has a rich and complex history spanning over seven "
+    "decades. The field began in the summer of 1956 at Dartmouth College, where "
+    "John McCarthy, Marvin Minsky, Nathaniel Rochester, and Claude Shannon "
+    "organized a workshop that would define the field. Early AI research was "
+    "characterized by unbridled optimism and significant government funding. "
+    "Researchers believed that human-level AI was just around the corner. "
+    "Programs like the Logic Theorist and the General Problem Solver showed "
+    "that machines could perform tasks previously thought to require human "
+    "intelligence. However, the limitations of these early systems soon became "
+    "apparent, leading to the first AI winter in the 1970s. Funding dried up "
+    "and progress stalled for nearly a decade. The second wave came with expert "
+    "systems in the 1980s, which showed commercial promise but ultimately proved "
+    "brittle and expensive to maintain. Machine learning emerged as a more "
+    "robust approach, with neural networks gaining traction after Rumelhart "
+    "and Hinton popularized backpropagation. The deep learning revolution began "
+    "in 2012 when AlexNet won ImageNet, and since then transformers, attention "
+    "mechanisms, and large language models have transformed the field entirely.",
+] * GPU_BATCH_SIZE
+
+
+def _make_gpu_model():
+    """Load Qwen 3.5 9B with QLoRA for GPU benchmarking."""
+    from transformers import AutoConfig, BitsAndBytesConfig
+    from bakery.deps import ensure_deps
+
+    model_config = AutoConfig.from_pretrained(GPU_MODEL)
+    ensure_deps(model_type=model_config.model_type, features=["qlora"])
+
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.bfloat16,
+    )
+    model = AutoModelForCausalLM.from_pretrained(
+        GPU_MODEL,
+        quantization_config=bnb_config,
+        device_map="auto",
+        torch_dtype=torch.bfloat16,
+    )
+    peft_config = PeftLoraConfig(
+        r=32,
+        lora_alpha=64,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+        task_type="CAUSAL_LM",
+    )
+    model = get_peft_model(model, peft_config)
+    model.enable_input_require_grads()
+    return model
+
+
+def _make_gpu_trainer():
+    """Create a PromptBakingTrainer with Qwen 3.5 9B QLoRA."""
+    tokenizer = AutoTokenizer.from_pretrained(GPU_MODEL)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    model = _make_gpu_model()
+
+    args = BakeryConfig(
+        output_dir="/tmp/bakery_bench_gpu",
+        system_prompt="You are a helpful assistant.",
+        num_trajectories=1,
+        trajectory_length=16,
+        per_device_train_batch_size=GPU_BATCH_SIZE,
+        num_train_epochs=1,
+        logging_steps=1,
+        report_to="none",
+        gradient_checkpointing=True,
+        bf16=True,
+    )
+
+    dataset = create_dataset(_GPU_PROMPTS, _GPU_RESPONSES)
+    return PromptBakingTrainer(
+        model=model,
+        args=args,
+        train_dataset=dataset,
+        processing_class=tokenizer,
+        data_collator=prompt_baking_collator,
+    )
+
+
+# Cache the GPU trainer so both tests share the same model in VRAM.
+_gpu_trainer_cache = None
+
+
+def _get_gpu_trainer():
+    global _gpu_trainer_cache
+    if _gpu_trainer_cache is None:
+        _gpu_trainer_cache = _make_gpu_trainer()
+    return _gpu_trainer_cache
+
+
+@pytest.mark.benchmark
+@pytest.mark.gpu
+def test_bench_gpu_compute_loss():
+    """Measure compute_loss on Qwen 3.5 9B QLoRA (batch=2)."""
+    if not USE_GPU:
+        pytest.skip("GPU not available")
+
+    trainer = _get_gpu_trainer()
+    inputs = {
+        "user_messages": _GPU_PROMPTS,
+        "responses": _GPU_RESPONSES,
+    }
+
+    # Warm up
+    loss = trainer.compute_loss(trainer.model, inputs)
+    loss.backward()
+    trainer.model.zero_grad()
+    torch.cuda.synchronize()
+
+    n_iters = 3
+    times = []
+    for _ in range(n_iters):
+        trainer.model.zero_grad()
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        loss = trainer.compute_loss(trainer.model, inputs)
+        loss.backward()
+        torch.cuda.synchronize()
+        times.append(time.perf_counter() - t0)
+
+    median = statistics.median(times)
+    peak_gb = torch.cuda.max_memory_allocated() / (1024**3)
+    _record(
+        "gpu_compute_loss_9b",
+        median,
+        1,
+        {
+            "median_ms": median * 1000,
+            "batch_size": GPU_BATCH_SIZE,
+            "samples_per_sec": GPU_BATCH_SIZE / median,
+            "gpu_peak_gb": peak_gb,
+        },
+    )
+
+
+@pytest.mark.benchmark
+@pytest.mark.gpu
+def test_bench_gpu_multi_step():
+    """Measure 3 training steps on Qwen 3.5 9B QLoRA."""
+    if not USE_GPU:
+        pytest.skip("GPU not available")
+
+    n_steps = 3
+    trainer = _get_gpu_trainer()
+    inputs = {
+        "user_messages": _GPU_PROMPTS,
+        "responses": _GPU_RESPONSES,
+    }
+
+    # Warm up
+    loss = trainer.compute_loss(trainer.model, dict(inputs))
+    loss.backward()
+    trainer.model.zero_grad()
+    torch.cuda.synchronize()
+
+    torch.cuda.reset_peak_memory_stats()
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    for _ in range(n_steps):
+        trainer.model.zero_grad()
+        loss = trainer.compute_loss(trainer.model, dict(inputs))
+        loss.backward()
+    torch.cuda.synchronize()
+    elapsed = time.perf_counter() - t0
+
+    peak_gb = torch.cuda.max_memory_allocated() / (1024**3)
+    _record(
+        "gpu_multi_step_9b",
+        elapsed,
+        n_steps,
+        {
+            "steps_per_sec": n_steps / elapsed,
+            "samples_per_sec": (n_steps * GPU_BATCH_SIZE) / elapsed,
+            "gpu_peak_gb": peak_gb,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # Comparison & Summary
 # ---------------------------------------------------------------------------
 

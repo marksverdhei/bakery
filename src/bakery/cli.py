@@ -110,6 +110,21 @@ def main():
     if heldout_qa:
         print(f"  Held-out Q&A: {len(heldout_qa)}")
 
+    # Auto-install optional dependencies based on model and features
+    if data_config.auto_install_optional_deps:
+        from transformers import AutoConfig
+        from bakery.deps import ensure_deps
+
+        model_config = AutoConfig.from_pretrained(
+            data_config.model_name_or_path,
+            trust_remote_code=data_config.trust_remote_code,
+        )
+        model_type = getattr(model_config, "model_type", None)
+        features = []
+        if data_config.load_in_4bit:
+            features.append("qlora")
+        ensure_deps(model_type=model_type, features=features)
+
     # Load model
     print(f"\n[1] Loading model: {data_config.model_name_or_path}")
     torch_dtype = DTYPE_MAP.get(data_config.torch_dtype, torch.bfloat16)
