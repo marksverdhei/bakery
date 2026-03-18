@@ -89,8 +89,6 @@ jobs:
           sbom: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache-arm64
-          cache-to: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache-arm64,mode=min
 
       - name: Cleanup
         if: always()
