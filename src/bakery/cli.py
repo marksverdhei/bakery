@@ -110,6 +110,21 @@ def main():
     if heldout_qa:
         print(f"  Held-out Q&A: {len(heldout_qa)}")
 
+    # Auto-install optional dependencies based on model and features
+    if data_config.auto_install_optional_deps:
+        from transformers import AutoConfig
+        from bakery.deps import ensure_deps
+
+        model_config = AutoConfig.from_pretrained(
+            data_config.model_name_or_path,
+            trust_remote_code=data_config.trust_remote_code,
+        )
+        model_type = getattr(model_config, "model_type", None)
+        features = []
+        if data_config.load_in_4bit:
+            features.append("qlora")
+        ensure_deps(model_type=model_type, features=features)
+
     # Load model
     print(f"\n[1] Loading model: {data_config.model_name_or_path}")
     torch_dtype = DTYPE_MAP.get(data_config.torch_dtype, torch.bfloat16)
@@ -125,19 +140,46 @@ def main():
         torch_dtype=torch_dtype,
         device_map="auto",
         trust_remote_code=data_config.trust_remote_code,
+        low_cpu_mem_usage=True,
     )
+    if data_config.attn_implementation:
+        load_kwargs["attn_implementation"] = data_config.attn_implementation
     if data_config.load_in_4bit:
-        load_kwargs["quantization_config"] = BitsAndBytesConfig(
+        bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type=data_config.bnb_4bit_quant_type,
             bnb_4bit_compute_dtype=torch_dtype,
             bnb_4bit_use_double_quant=data_config.bnb_4bit_use_double_quant,
         )
+        load_kwargs["quantization_config"] = bnb_config
         print("  Loading in 4-bit (QLoRA mode)")
+        # Workaround: transformers >=5.x core_model_loading materializes tensors
+        # on GPU at full precision before quantization, causing OOM for large models.
+        # We load to CPU first with quantization, then dispatch to GPU.
+        # See: https://github.com/huggingface/transformers/issues/43032
+        try:
+            base_model = AutoModelForCausalLM.from_pretrained(
+                data_config.model_name_or_path, **load_kwargs
+            )
+        except torch.OutOfMemoryError:
+            print("  GPU OOM during quantized loading — retrying via CPU + dispatch")
+            torch.cuda.empty_cache()
+            cpu_kwargs = {**load_kwargs, "device_map": "cpu"}
+            base_model = AutoModelForCausalLM.from_pretrained(
+                data_config.model_name_or_path, **cpu_kwargs
+            )
+            from accelerate import dispatch_model, infer_auto_device_map
 
-    base_model = AutoModelForCausalLM.from_pretrained(
-        data_config.model_name_or_path, **load_kwargs
-    )
+            gpu_mem = torch.cuda.get_device_properties(0).total_memory
+            device_map = infer_auto_device_map(
+                base_model,
+                max_memory={0: f"{gpu_mem // (1024**3) - 2}GiB", "cpu": "32GiB"},
+            )
+            base_model = dispatch_model(base_model, device_map=device_map)
+    else:
+        base_model = AutoModelForCausalLM.from_pretrained(
+            data_config.model_name_or_path, **load_kwargs
+        )
 
     prompt_tokens = len(tokenizer.encode(system_prompt))
     print(f"  System prompt tokens: {prompt_tokens:,}")

@@ -113,6 +113,19 @@ class DataConfig:
         default=True,
         metadata={"help": "Use double quantization for 4-bit."},
     )
+    attn_implementation: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Attention implementation: flash_attention_2, sdpa, eager, or None for default."
+        },
+    )
+    auto_install_optional_deps: bool = field(
+        default=True,
+        metadata={
+            "help": "Auto-install missing optional dependencies at runtime. "
+            "Disabled when HF_HUB_OFFLINE=1 is set."
+        },
+    )
 
     # Training data — provide ONE of these
     dataset: Optional[str] = field(

@@ -34,4 +34,5 @@ dev = [
 pythonpath = ["src"]
 markers = [
     "benchmark: performance benchmark tests (select with '-m benchmark')",
+    "gpu: GPU-only benchmarks using large models (select with '-m gpu')",
 ]
