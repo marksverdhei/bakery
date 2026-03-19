@@ -91,19 +91,35 @@ def build_system_prompt(
 
 
 def load_data(
-    data_config: DataConfig,
+    data_config: Optional[DataConfig] = None,
+    *,
+    dataset: Optional[str] = None,
+    dataset_split: str = "train",
+    training_prompts: Optional[List[str]] = None,
 ) -> Tuple[List[str], Optional[List[str]]]:
-    """Load training data from config.
+    """Load training data from config or explicit parameters.
+
+    Can be called with a DataConfig object (backward-compatible) or with
+    explicit keyword arguments for dataset/split/training_prompts.
 
     Returns:
         (prompts, responses) where responses is None if only prompts are
         available (triggering on-the-fly trajectory generation).
     """
-    if data_config.dataset:
-        return load_dataset(data_config.dataset, data_config.dataset_split)
+    if data_config is not None:
+        dataset = dataset or data_config.dataset
+        dataset_split = (
+            data_config.dataset_split
+            if dataset == data_config.dataset
+            else dataset_split
+        )
+        training_prompts = training_prompts or data_config.training_prompts
 
-    if data_config.training_prompts:
-        return data_config.training_prompts, None
+    if dataset:
+        return load_dataset(dataset, dataset_split)
+
+    if training_prompts:
+        return training_prompts, None
 
     raise ValueError(
         "No training data configured. Provide 'dataset' or 'training_prompts'."
