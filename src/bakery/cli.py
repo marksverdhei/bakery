@@ -133,11 +133,20 @@ def main():
 
     if data_config.use_unsloth:
         from unsloth import FastLanguageModel
+        from transformers import AutoConfig as _AC
+
+        _model_cfg = _AC.from_pretrained(
+            data_config.model_name_or_path,
+            trust_remote_code=data_config.trust_remote_code,
+        )
+        unsloth_max_seq = baking_config.max_seq_length or getattr(
+            _model_cfg, "max_position_embeddings", 4096
+        )
 
         print("  Using Unsloth optimized loading")
         base_model, tokenizer = FastLanguageModel.from_pretrained(
             model_name=data_config.model_name_or_path,
-            max_seq_length=data_config.max_seq_length,
+            max_seq_length=unsloth_max_seq,
             dtype=torch_dtype,
             load_in_4bit=data_config.load_in_4bit,
         )

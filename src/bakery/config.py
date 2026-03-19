@@ -148,12 +148,6 @@ class DataConfig:
             "Provides ~2x speedup and 60-70%% VRAM reduction."
         },
     )
-    max_seq_length: int = field(
-        default=2048,
-        metadata={
-            "help": "Maximum sequence length (required by Unsloth for RoPE scaling)."
-        },
-    )
 
     # Training data — provide ONE of these
     dataset: Optional[str] = field(

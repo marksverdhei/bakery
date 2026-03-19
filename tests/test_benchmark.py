@@ -887,3 +887,264 @@ def test_bench_print_summary(request):
     lines.append("=" * 95)
     summary = "\n".join(lines)
     print(summary)
+
+
+# ---------------------------------------------------------------------------
+# Unsloth vs Standard comparison benchmarks (requires CUDA + unsloth)
+# ---------------------------------------------------------------------------
+
+UNSLOTH_MODEL = "Qwen/Qwen3-4B"
+UNSLOTH_BATCH_SIZE = 2
+UNSLOTH_LORA_R = 32
+UNSLOTH_LORA_ALPHA = 64
+UNSLOTH_TARGET_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj"]
+
+_UNSLOTH_PROMPTS = [
+    "Explain the key differences between supervised and unsupervised learning, "
+    "providing examples of each and discussing when you would choose one over "
+    "the other in real-world applications.",
+] * UNSLOTH_BATCH_SIZE
+
+_UNSLOTH_RESPONSES = [
+    "Supervised learning uses labeled training data where each input has a "
+    "corresponding output. The algorithm learns to map inputs to outputs by "
+    "minimizing prediction error. Common examples include image classification, "
+    "spam detection, and medical diagnosis. Unsupervised learning works with "
+    "unlabeled data and aims to discover hidden patterns or structure. Examples "
+    "include customer segmentation, anomaly detection, and dimensionality "
+    "reduction. Choose supervised learning when you have labeled data and a "
+    "clear prediction target. Choose unsupervised learning for exploratory "
+    "analysis or when labels are expensive to obtain.",
+] * UNSLOTH_BATCH_SIZE
+
+
+def _has_unsloth():
+    try:
+        import unsloth  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+requires_unsloth_gpu = pytest.mark.skipif(
+    not _has_unsloth() or not USE_GPU,
+    reason="Requires unsloth and CUDA GPU",
+)
+
+
+def _make_standard_lora_model(use_qlora=False):
+    """Load model with standard PEFT LoRA (optionally QLoRA)."""
+    from transformers import BitsAndBytesConfig
+
+    load_kwargs = dict(
+        torch_dtype=torch.bfloat16,
+        device_map="auto",
+        low_cpu_mem_usage=True,
+    )
+    if use_qlora:
+        load_kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+        )
+
+    model = AutoModelForCausalLM.from_pretrained(UNSLOTH_MODEL, **load_kwargs)
+    peft_config = PeftLoraConfig(
+        r=UNSLOTH_LORA_R,
+        lora_alpha=UNSLOTH_LORA_ALPHA,
+        target_modules=UNSLOTH_TARGET_MODULES,
+        lora_dropout=0,
+        task_type="CAUSAL_LM",
+    )
+    model = get_peft_model(model, peft_config)
+    if use_qlora:
+        model.enable_input_require_grads()
+    return model
+
+
+def _make_unsloth_model(use_qlora=False):
+    """Load model with Unsloth-optimized LoRA."""
+    from unsloth import FastLanguageModel
+
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=UNSLOTH_MODEL,
+        max_seq_length=2048,
+        dtype=torch.bfloat16,
+        load_in_4bit=use_qlora,
+    )
+    model = FastLanguageModel.get_peft_model(
+        model,
+        r=UNSLOTH_LORA_R,
+        lora_alpha=UNSLOTH_LORA_ALPHA,
+        target_modules=UNSLOTH_TARGET_MODULES,
+        lora_dropout=0,
+        bias="none",
+        use_gradient_checkpointing="unsloth",
+    )
+    return model, tokenizer
+
+
+def _make_trainer_no_dataset(model, tokenizer, batch_size=2):
+    """Create a PromptBakingTrainer without a real Dataset.
+
+    Avoids Python 3.14 pickle incompatibility with HF datasets by passing
+    a minimal list-based dataset that satisfies the Trainer constructor.
+    We call compute_loss directly, so the dataset is never actually iterated.
+    """
+    args = BakeryConfig(
+        output_dir="/tmp/bakery_bench_unsloth",
+        system_prompt="You are a helpful assistant.",
+        num_trajectories=1,
+        trajectory_length=16,
+        per_device_train_batch_size=batch_size,
+        num_train_epochs=1,
+        logging_steps=1,
+        report_to="none",
+        gradient_checkpointing=True,
+        bf16=True,
+    )
+    # Minimal dummy dataset — Trainer needs it but we call compute_loss directly
+    dummy = [{"user_messages": "x", "responses": "y"}]
+    return PromptBakingTrainer(
+        model=model,
+        args=args,
+        train_dataset=dummy,
+        processing_class=tokenizer,
+        data_collator=prompt_baking_collator,
+    )
+
+
+def _bench_compute_loss(trainer, label, n_iters=3):
+    """Run compute_loss benchmark and record results."""
+    inputs = {
+        "user_messages": _UNSLOTH_PROMPTS,
+        "responses": _UNSLOTH_RESPONSES,
+    }
+
+    # Warm up
+    loss = trainer.compute_loss(trainer.model, inputs)
+    loss.backward()
+    trainer.model.zero_grad()
+    torch.cuda.synchronize()
+
+    torch.cuda.reset_peak_memory_stats()
+    times = []
+    for _ in range(n_iters):
+        trainer.model.zero_grad()
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        loss = trainer.compute_loss(trainer.model, inputs)
+        loss.backward()
+        torch.cuda.synchronize()
+        times.append(time.perf_counter() - t0)
+
+    median = statistics.median(times)
+    peak_gb = torch.cuda.max_memory_allocated() / (1024**3)
+    return _record(
+        label,
+        median,
+        1,
+        {
+            "median_ms": median * 1000,
+            "batch_size": UNSLOTH_BATCH_SIZE,
+            "samples_per_sec": UNSLOTH_BATCH_SIZE / median,
+            "gpu_peak_gb": peak_gb,
+        },
+    )
+
+
+@requires_unsloth_gpu
+@pytest.mark.benchmark
+@pytest.mark.gpu
+def test_bench_unsloth_vs_standard_qlora():
+    """Compare Unsloth vs standard QLoRA: compute_loss speed and VRAM."""
+    # --- Standard QLoRA ---
+    tokenizer = AutoTokenizer.from_pretrained(UNSLOTH_MODEL)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    std_model = _make_standard_lora_model(use_qlora=True)
+    std_trainer = _make_trainer_no_dataset(std_model, tokenizer, UNSLOTH_BATCH_SIZE)
+    std_result = _bench_compute_loss(std_trainer, "qlora_standard_4b")
+
+    # Free standard model
+    del std_trainer, std_model
+    torch.cuda.empty_cache()
+
+    # --- Unsloth QLoRA ---
+    unsloth_model, unsloth_tok = _make_unsloth_model(use_qlora=True)
+    if unsloth_tok.pad_token is None:
+        unsloth_tok.pad_token = unsloth_tok.eos_token
+
+    uns_trainer = _make_trainer_no_dataset(
+        unsloth_model, unsloth_tok, UNSLOTH_BATCH_SIZE
+    )
+    uns_result = _bench_compute_loss(uns_trainer, "qlora_unsloth_4b")
+
+    # Print comparison
+    std_ms = std_result["median_ms"]
+    uns_ms = uns_result["median_ms"]
+    speedup = std_ms / uns_ms if uns_ms > 0 else float("inf")
+    std_gb = std_result["gpu_peak_gb"]
+    uns_gb = uns_result["gpu_peak_gb"]
+    vram_saving = (1 - uns_gb / std_gb) * 100 if std_gb > 0 else 0
+
+    print(f"\n{'=' * 60}")
+    print(f"QLoRA COMPARISON: {UNSLOTH_MODEL} (batch={UNSLOTH_BATCH_SIZE})")
+    print(f"{'=' * 60}")
+    print(f"  Standard:  {std_ms:.1f} ms, {std_gb:.2f} GB VRAM")
+    print(f"  Unsloth:   {uns_ms:.1f} ms, {uns_gb:.2f} GB VRAM")
+    print(f"  Speedup:   {speedup:.2f}x")
+    print(f"  VRAM saved: {vram_saving:.1f}%")
+    print(f"{'=' * 60}")
+
+    del uns_trainer, unsloth_model
+    torch.cuda.empty_cache()
+
+
+@requires_unsloth_gpu
+@pytest.mark.benchmark
+@pytest.mark.gpu
+def test_bench_unsloth_vs_standard_lora():
+    """Compare Unsloth vs standard LoRA (full precision): speed and VRAM."""
+    # --- Standard LoRA ---
+    tokenizer = AutoTokenizer.from_pretrained(UNSLOTH_MODEL)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    std_model = _make_standard_lora_model(use_qlora=False)
+    std_trainer = _make_trainer_no_dataset(std_model, tokenizer, UNSLOTH_BATCH_SIZE)
+    std_result = _bench_compute_loss(std_trainer, "lora_standard_4b")
+
+    del std_trainer, std_model
+    torch.cuda.empty_cache()
+
+    # --- Unsloth LoRA ---
+    unsloth_model, unsloth_tok = _make_unsloth_model(use_qlora=False)
+    if unsloth_tok.pad_token is None:
+        unsloth_tok.pad_token = unsloth_tok.eos_token
+
+    uns_trainer = _make_trainer_no_dataset(
+        unsloth_model, unsloth_tok, UNSLOTH_BATCH_SIZE
+    )
+    uns_result = _bench_compute_loss(uns_trainer, "lora_unsloth_4b")
+
+    std_ms = std_result["median_ms"]
+    uns_ms = uns_result["median_ms"]
+    speedup = std_ms / uns_ms if uns_ms > 0 else float("inf")
+    std_gb = std_result["gpu_peak_gb"]
+    uns_gb = uns_result["gpu_peak_gb"]
+    vram_saving = (1 - uns_gb / std_gb) * 100 if std_gb > 0 else 0
+
+    print(f"\n{'=' * 60}")
+    print(f"LoRA COMPARISON: {UNSLOTH_MODEL} (batch={UNSLOTH_BATCH_SIZE})")
+    print(f"{'=' * 60}")
+    print(f"  Standard:  {std_ms:.1f} ms, {std_gb:.2f} GB VRAM")
+    print(f"  Unsloth:   {uns_ms:.1f} ms, {uns_gb:.2f} GB VRAM")
+    print(f"  Speedup:   {speedup:.2f}x")
+    print(f"  VRAM saved: {vram_saving:.1f}%")
+    print(f"{'=' * 60}")
+
+    del uns_trainer, unsloth_model
+    torch.cuda.empty_cache()
