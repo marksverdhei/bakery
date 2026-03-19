@@ -45,6 +45,21 @@ class BakeryConfig(TrainingArguments):
         default=0.8,
         metadata={"help": "Temperature for trajectory generation sampling."},
     )
+    max_seq_length: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "Truncate sequences to this many tokens. None = no truncation."
+        },
+    )
+    sequential_eval: bool = field(
+        default=False,
+        metadata={
+            "help": "Run teacher and student forward passes sequentially during eval, "
+            "offloading teacher logits to CPU between passes. Reduces peak VRAM at the "
+            "cost of extra CPU-GPU transfers. Useful for large models that OOM with "
+            "both passes in memory simultaneously."
+        },
+    )
 
     def __post_init__(self):
         self.remove_unused_columns = False
@@ -146,6 +161,14 @@ class DataConfig:
         metadata={"help": "Inline list of training prompts (on-the-fly generation)."},
     )
 
+    eval_dataset_split: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Dataset split for validation loss (e.g. 'test_sft[:200]'). "
+            "Uses the same 'dataset' source. Combine with eval_strategy/eval_steps."
+        },
+    )
+
     # Evaluation
     eval_file: Optional[str] = field(
         default=None,
@@ -177,7 +200,7 @@ class LoraConfig:
 
     r: int = field(default=64, metadata={"help": "LoRA rank."})
     lora_alpha: int = field(default=128, metadata={"help": "LoRA alpha scaling."})
-    target_modules: List[str] = field(
+    target_modules: Optional[List[str]] = field(
         default_factory=lambda: [
             "q_proj",
             "k_proj",
@@ -187,7 +210,17 @@ class LoraConfig:
             "up_proj",
             "down_proj",
         ],
-        metadata={"help": "Modules to apply LoRA to."},
+        metadata={
+            "help": "Modules to apply LoRA to. Use 'all-linear' or 'all' to target all linear layers."
+        },
     )
+
+    def __post_init__(self):
+        # Support "all" as shorthand for "all-linear" (PEFT convention)
+        if self.target_modules == "all" or self.target_modules == ["all"]:
+            self.target_modules = "all-linear"
+        elif self.target_modules == ["all-linear"]:
+            self.target_modules = "all-linear"
+
     lora_dropout: float = field(default=0.05, metadata={"help": "LoRA dropout."})
     bias: str = field(default="none", metadata={"help": "LoRA bias mode."})

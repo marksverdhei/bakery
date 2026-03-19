@@ -241,10 +241,28 @@ def main():
 
     train_dataset = create_dataset(training_prompts, precomputed_responses)
 
+    eval_dataset = None
+    if data_config.eval_dataset_split and data_config.dataset:
+        print(f"  Loading eval split: {data_config.eval_dataset_split}")
+        eval_prompts, eval_responses = load_data(
+            type(
+                "_DC",
+                (),
+                {
+                    "dataset": data_config.dataset,
+                    "dataset_split": data_config.eval_dataset_split,
+                    "training_prompts": None,
+                },
+            )()
+        )
+        eval_dataset = create_dataset(eval_prompts, eval_responses)
+        print(f"  Eval samples: {len(eval_dataset)}")
+
     trainer = PromptBakingTrainer(
         model=model,
         args=baking_config,
         train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
         processing_class=tokenizer,
         data_collator=prompt_baking_collator,
     )

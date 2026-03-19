@@ -87,6 +87,10 @@ class PromptBakingTrainer(Trainer):
     # -- Chat formatting --
 
     def _tokenize(self, text: str, **kwargs) -> dict:
+        max_len = getattr(self.args, "max_seq_length", None)
+        if max_len:
+            kwargs.setdefault("truncation", True)
+            kwargs.setdefault("max_length", max_len)
         return self.processing_class(text, add_special_tokens=False, **kwargs)
 
     def _get_prompt_lengths(self, user_message: str) -> tuple[int, int]:
@@ -154,7 +158,7 @@ class PromptBakingTrainer(Trainer):
             logger.warning(
                 "Batch has no user_messages or responses — returning zero loss"
             )
-            loss = torch.tensor(0.0, device=self.args.device)
+            loss = torch.tensor(0.0, device=self.args.device, requires_grad=True)
             return (loss, None) if return_outputs else loss
 
         pairs = [
@@ -164,7 +168,7 @@ class PromptBakingTrainer(Trainer):
             logger.warning(
                 "All responses in batch are empty/whitespace — returning zero loss"
             )
-            loss = torch.tensor(0.0, device=self.args.device)
+            loss = torch.tensor(0.0, device=self.args.device, requires_grad=True)
             return (loss, None) if return_outputs else loss
 
         teacher_texts, student_texts = [], []
@@ -268,11 +272,126 @@ class PromptBakingTrainer(Trainer):
 
         if not losses:
             logger.warning("No aligned logit pairs after slicing — returning zero loss")
-            zero = torch.tensor(0.0, device=self.args.device)
+            zero = torch.tensor(0.0, device=self.args.device, requires_grad=True)
             return (zero, None) if return_outputs else zero
 
         total_loss = torch.stack(losses).mean()
         return (total_loss, None) if return_outputs else total_loss
+
+    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
+        """Eval step: reuse compute_loss so the collated batch format works.
+
+        With sequential_eval=True, teacher logits are moved to CPU before the
+        student forward pass to halve peak VRAM usage.
+        """
+        if not self.args.sequential_eval:
+            # Unwrap to bypass Accelerate's fp32 upcast wrapper
+            raw = model.module if hasattr(model, "module") else model
+            with torch.no_grad():
+                loss = self.compute_loss(raw, inputs)
+            return (loss.detach(), None, None)
+
+        # Sequential eval: teacher → offload logits to CPU → student
+        user_messages = inputs.get("user_messages", [])
+        responses = inputs.get("responses", [])
+        pairs = [(m, r) for m, r in zip(user_messages, responses) if r.strip()]
+        if not pairs:
+            return (
+                torch.tensor(0.0, device=self.args.device, requires_grad=True),
+                None,
+                None,
+            )
+
+        teacher_texts, student_texts = [], []
+        teacher_prompt_lengths, student_prompt_lengths = [], []
+        for user_msg, response in pairs:
+            t_msgs = [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": user_msg},
+                {"role": "assistant", "content": response},
+            ]
+            s_msgs = [
+                {"role": "user", "content": user_msg},
+                {"role": "assistant", "content": response},
+            ]
+            teacher_texts.append(
+                self.processing_class.apply_chat_template(t_msgs, tokenize=False)
+            )
+            student_texts.append(
+                self.processing_class.apply_chat_template(s_msgs, tokenize=False)
+            )
+            t_len, s_len = self._get_prompt_lengths(user_msg)
+            teacher_prompt_lengths.append(t_len)
+            student_prompt_lengths.append(s_len)
+
+        with padding_side(self.processing_class, "left"):
+            teacher_inputs = self._tokenize(
+                teacher_texts, return_tensors="pt", padding=True
+            ).to(model.device)
+            student_inputs = self._tokenize(
+                student_texts, return_tensors="pt", padding=True
+            ).to(model.device)
+
+        def _make_fwd(tok_inputs):
+            fwd = dict(
+                input_ids=tok_inputs["input_ids"],
+                attention_mask=tok_inputs["attention_mask"],
+            )
+            if hasattr(model.config, "model_type") and model.config.model_type in (
+                "gemma3",
+            ):
+                fwd["token_type_ids"] = torch.zeros_like(tok_inputs["input_ids"])
+            elif "token_type_ids" in tok_inputs:
+                fwd["token_type_ids"] = tok_inputs["token_type_ids"]
+            return fwd
+
+        # Accelerate replaces model.forward with a wrapper that upcasts to fp32.
+        # Bypass by calling the CLASS forward method directly.
+        base = model.module if hasattr(model, "module") else model
+        fwd_fn = type(base).forward
+        with torch.no_grad():
+            with disable_adapters(base):
+                teacher_logits = fwd_fn(base, **_make_fwd(teacher_inputs)).logits.cpu()
+            torch.cuda.empty_cache()
+            student_outputs = fwd_fn(base, **_make_fwd(student_inputs))
+
+        t_seq_len = teacher_inputs["input_ids"].shape[1]
+        s_seq_len = student_inputs["input_ids"].shape[1]
+        t_real_lengths = teacher_inputs["attention_mask"].sum(dim=1)
+        s_real_lengths = student_inputs["attention_mask"].sum(dim=1)
+
+        losses = []
+        for i in range(len(pairs)):
+            t_pad = t_seq_len - t_real_lengths[i].item()
+            s_pad = s_seq_len - s_real_lengths[i].item()
+            t_start = int(t_pad) + teacher_prompt_lengths[i]
+            s_start = int(s_pad) + student_prompt_lengths[i]
+
+            t_logits = teacher_logits[i : i + 1, t_start - 1 : -1, :].to(model.device)
+            s_logits = student_outputs.logits[i : i + 1, s_start - 1 : -1, :]
+            t_mask = teacher_inputs["attention_mask"][i : i + 1, t_start:]
+            s_mask = student_inputs["attention_mask"][i : i + 1, s_start:]
+
+            min_len = min(t_logits.shape[1], s_logits.shape[1])
+            if min_len == 0:
+                continue
+            mask = (t_mask[:, :min_len] * s_mask[:, :min_len]).float()
+            losses.append(
+                compute_kl_divergence(
+                    t_logits[:, :min_len, :],
+                    s_logits[:, :min_len, :],
+                    mask,
+                    self.kl_temperature,
+                )
+            )
+
+        if not losses:
+            return (
+                torch.tensor(0.0, device=self.args.device, requires_grad=True),
+                None,
+                None,
+            )
+        return (torch.stack(losses).mean().detach(), None, None)
 
     def training_step(self, model, inputs, num_items_in_batch=None) -> torch.Tensor:
         """Generate trajectories on-the-fly if no precomputed responses."""
