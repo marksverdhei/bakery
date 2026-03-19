@@ -28,7 +28,7 @@ RUN uv pip install torch --index-url https://download.pytorch.org/whl/cu128
 WORKDIR /opt/bakery
 COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY src/ src/
-RUN uv pip install ".[qlora]"
+RUN uv pip install ".[qlora]" wandb flash-linear-attention
 
 # Verify installation
 RUN python3 -c "import bakery; import torch; print(f'bakery OK, torch={torch.__version__}, cuda_built={torch.version.cuda}')"

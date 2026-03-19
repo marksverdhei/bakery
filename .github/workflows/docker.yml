@@ -8,6 +8,7 @@ on:
 
 env:
   IMAGE_NAME: marksverdhei/bakery
+  ARM64_CACHE_DIR: /var/lib/buildx-cache/bakery-arm64
 
 jobs:
   build-amd64:
@@ -42,6 +43,12 @@ jobs:
             docker push "$tag"
           done
 
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rmi ${{ env.IMAGE_NAME }}:ci-build 2>/dev/null || true
+          docker image prune -f --filter "label=org.opencontainers.image.source=https://github.com/marksverdhei/bakery" --filter "until=72h" 2>/dev/null || true
+
   build-arm64:
     runs-on: [self-hosted, linux, x64]
     needs: build-amd64
@@ -55,6 +62,12 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          buildkitd-config-inline: |
+            [worker.oci]
+            [[worker.oci.gcpolicy]]
+              maxUsedSpace = "20GB"
+              keepDuration = 604800
 
       - name: Login to DockerHub
         uses: docker/login-action@v3
@@ -72,6 +85,9 @@ jobs:
             type=semver,pattern={{version}},suffix=-arm64
             type=sha,prefix=,suffix=-arm64
 
+      - name: Prepare cache
+        run: mkdir -p ${{ env.ARM64_CACHE_DIR }}
+
       - name: Build and push (arm64)
         uses: docker/build-push-action@v6
         with:
@@ -80,5 +96,22 @@ jobs:
           platforms: linux/arm64
           push: true
           provenance: false
+          sbom: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=local,src=${{ env.ARM64_CACHE_DIR }}
+          cache-to: type=local,dest=${{ env.ARM64_CACHE_DIR }}-new,mode=max
+
+      - name: Rotate cache
+        if: always()
+        run: |
+          rm -rf ${{ env.ARM64_CACHE_DIR }}
+          if [ -d "${{ env.ARM64_CACHE_DIR }}-new" ]; then
+            mv ${{ env.ARM64_CACHE_DIR }}-new ${{ env.ARM64_CACHE_DIR }}
+          fi
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker buildx prune -f --keep-storage 20g 2>/dev/null || true
+          docker image prune -f --filter "until=72h" 2>/dev/null || true
