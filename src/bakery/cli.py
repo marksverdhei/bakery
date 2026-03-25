@@ -123,63 +123,91 @@ def main():
         features = []
         if data_config.load_in_4bit:
             features.append("qlora")
+        if data_config.use_unsloth:
+            features.append("unsloth")
         ensure_deps(model_type=model_type, features=features)
 
     # Load model
     print(f"\n[1] Loading model: {data_config.model_name_or_path}")
     torch_dtype = DTYPE_MAP.get(data_config.torch_dtype, torch.bfloat16)
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        data_config.model_name_or_path,
-        trust_remote_code=data_config.trust_remote_code,
-    )
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    if data_config.use_unsloth:
+        from unsloth import FastLanguageModel
+        from transformers import AutoConfig as _AC
 
-    load_kwargs = dict(
-        torch_dtype=torch_dtype,
-        device_map="auto",
-        trust_remote_code=data_config.trust_remote_code,
-        low_cpu_mem_usage=True,
-    )
-    if data_config.attn_implementation:
-        load_kwargs["attn_implementation"] = data_config.attn_implementation
-    if data_config.load_in_4bit:
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type=data_config.bnb_4bit_quant_type,
-            bnb_4bit_compute_dtype=torch_dtype,
-            bnb_4bit_use_double_quant=data_config.bnb_4bit_use_double_quant,
+        _model_cfg = _AC.from_pretrained(
+            data_config.model_name_or_path,
+            trust_remote_code=data_config.trust_remote_code,
         )
-        load_kwargs["quantization_config"] = bnb_config
-        print("  Loading in 4-bit (QLoRA mode)")
-        # Workaround: transformers >=5.x core_model_loading materializes tensors
-        # on GPU at full precision before quantization, causing OOM for large models.
-        # We load to CPU first with quantization, then dispatch to GPU.
-        # See: https://github.com/huggingface/transformers/issues/43032
-        try:
+        unsloth_max_seq = baking_config.max_seq_length or getattr(
+            _model_cfg, "max_position_embeddings", 4096
+        )
+
+        print("  Using Unsloth optimized loading")
+        base_model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=data_config.model_name_or_path,
+            max_seq_length=unsloth_max_seq,
+            dtype=torch_dtype,
+            load_in_4bit=data_config.load_in_4bit,
+        )
+        if data_config.load_in_4bit:
+            print("  Loading in 4-bit (QLoRA mode via Unsloth)")
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(
+            data_config.model_name_or_path,
+            trust_remote_code=data_config.trust_remote_code,
+        )
+        load_kwargs = dict(
+            torch_dtype=torch_dtype,
+            device_map="auto",
+            trust_remote_code=data_config.trust_remote_code,
+            low_cpu_mem_usage=True,
+        )
+        if data_config.attn_implementation:
+            load_kwargs["attn_implementation"] = data_config.attn_implementation
+        if data_config.load_in_4bit:
+            bnb_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type=data_config.bnb_4bit_quant_type,
+                bnb_4bit_compute_dtype=torch_dtype,
+                bnb_4bit_use_double_quant=data_config.bnb_4bit_use_double_quant,
+            )
+            load_kwargs["quantization_config"] = bnb_config
+            print("  Loading in 4-bit (QLoRA mode)")
+            # Workaround: transformers >=5.x core_model_loading materializes tensors
+            # on GPU at full precision before quantization, causing OOM for large models.
+            # See: https://github.com/huggingface/transformers/issues/43032
+            try:
+                base_model = AutoModelForCausalLM.from_pretrained(
+                    data_config.model_name_or_path, **load_kwargs
+                )
+            except torch.OutOfMemoryError:
+                print(
+                    "  GPU OOM during quantized loading — retrying via CPU + dispatch"
+                )
+                torch.cuda.empty_cache()
+                cpu_kwargs = {**load_kwargs, "device_map": "cpu"}
+                base_model = AutoModelForCausalLM.from_pretrained(
+                    data_config.model_name_or_path, **cpu_kwargs
+                )
+                from accelerate import dispatch_model, infer_auto_device_map
+
+                gpu_mem = torch.cuda.get_device_properties(0).total_memory
+                device_map = infer_auto_device_map(
+                    base_model,
+                    max_memory={
+                        0: f"{gpu_mem // (1024**3) - 2}GiB",
+                        "cpu": "32GiB",
+                    },
+                )
+                base_model = dispatch_model(base_model, device_map=device_map)
+        else:
             base_model = AutoModelForCausalLM.from_pretrained(
                 data_config.model_name_or_path, **load_kwargs
             )
-        except torch.OutOfMemoryError:
-            print("  GPU OOM during quantized loading — retrying via CPU + dispatch")
-            torch.cuda.empty_cache()
-            cpu_kwargs = {**load_kwargs, "device_map": "cpu"}
-            base_model = AutoModelForCausalLM.from_pretrained(
-                data_config.model_name_or_path, **cpu_kwargs
-            )
-            from accelerate import dispatch_model, infer_auto_device_map
 
-            gpu_mem = torch.cuda.get_device_properties(0).total_memory
-            device_map = infer_auto_device_map(
-                base_model,
-                max_memory={0: f"{gpu_mem // (1024**3) - 2}GiB", "cpu": "32GiB"},
-            )
-            base_model = dispatch_model(base_model, device_map=device_map)
-    else:
-        base_model = AutoModelForCausalLM.from_pretrained(
-            data_config.model_name_or_path, **load_kwargs
-        )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
     prompt_tokens = len(tokenizer.encode(system_prompt))
     print(f"  System prompt tokens: {prompt_tokens:,}")
@@ -212,17 +240,31 @@ def main():
 
     # Add LoRA adapters
     print("\n[3] Adding LoRA adapters...")
-    peft_config = PeftLoraConfig(
-        r=lora_config.r,
-        lora_alpha=lora_config.lora_alpha,
-        target_modules=lora_config.target_modules,
-        lora_dropout=lora_config.lora_dropout,
-        bias=lora_config.bias,
-        task_type="CAUSAL_LM",
-    )
-    model = get_peft_model(base_model, peft_config)
-    if data_config.load_in_4bit:
-        model.enable_input_require_grads()
+    if data_config.use_unsloth:
+        from unsloth import FastLanguageModel
+
+        model = FastLanguageModel.get_peft_model(
+            base_model,
+            r=lora_config.r,
+            lora_alpha=lora_config.lora_alpha,
+            target_modules=lora_config.target_modules,
+            lora_dropout=0,  # Unsloth optimized kernels require dropout=0
+            bias=lora_config.bias,
+            use_gradient_checkpointing="unsloth",
+            random_state=baking_config.seed,
+        )
+    else:
+        peft_config = PeftLoraConfig(
+            r=lora_config.r,
+            lora_alpha=lora_config.lora_alpha,
+            target_modules=lora_config.target_modules,
+            lora_dropout=lora_config.lora_dropout,
+            bias=lora_config.bias,
+            task_type="CAUSAL_LM",
+        )
+        model = get_peft_model(base_model, peft_config)
+        if data_config.load_in_4bit:
+            model.enable_input_require_grads()
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())

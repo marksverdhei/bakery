@@ -26,6 +26,9 @@ FEATURE_OPTIONAL_DEPS: dict[str, list[tuple[str, str, str]]] = {
     "qlora": [
         ("bitsandbytes", "bitsandbytes", "4-bit quantization"),
     ],
+    "unsloth": [
+        ("unsloth", "unsloth", "optimized LoRA training kernels"),
+    ],
 }
 
 

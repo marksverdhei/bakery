@@ -141,6 +141,13 @@ class DataConfig:
             "Disabled when HF_HUB_OFFLINE=1 is set."
         },
     )
+    use_unsloth: bool = field(
+        default=False,
+        metadata={
+            "help": "Use Unsloth for optimized model loading and LoRA training. "
+            "Provides ~2x speedup and 60-70%% VRAM reduction."
+        },
+    )
 
     # Training data — provide ONE of these
     dataset: Optional[str] = field(
