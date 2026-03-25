@@ -138,7 +138,7 @@ def test_unsloth_compute_loss_integration():
     from unsloth import FastLanguageModel
 
     from bakery.config import BakeryConfig
-    from bakery.data import create_dataset, prompt_baking_collator
+    from bakery.data import prompt_baking_collator
     from bakery.trainer import PromptBakingTrainer
 
     model, tokenizer = FastLanguageModel.from_pretrained(
@@ -171,12 +171,14 @@ def test_unsloth_compute_loss_integration():
 
     prompts = ["What is 2+2?"]
     responses = ["The answer is 4."]
-    dataset = create_dataset(prompts, responses)
+    # Use a minimal list-based dataset to avoid Python 3.14 pickle
+    # incompatibility with HF datasets (Pickler._batch_setitems).
+    dummy = [{"user_messages": "x", "responses": "y"}]
 
     trainer = PromptBakingTrainer(
         model=model,
         args=args,
-        train_dataset=dataset,
+        train_dataset=dummy,
         processing_class=tokenizer,
         data_collator=prompt_baking_collator,
     )
