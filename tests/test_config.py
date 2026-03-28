@@ -63,6 +63,44 @@ def test_lora_target_modules_explicit_list_unchanged():
     assert lora.target_modules == modules
 
 
+# ---------------------------------------------------------------------------
+# DataConfig — eval_dataset (separate HF dataset for validation loss)
+# ---------------------------------------------------------------------------
+
+def test_eval_dataset_defaults_to_none():
+    data = DataConfig.__new__(DataConfig)
+    data.__init__()
+    assert data.eval_dataset is None
+
+
+def test_eval_dataset_set():
+    data = DataConfig(eval_dataset="HuggingFaceH4/ultrachat_200k")
+    assert data.eval_dataset == "HuggingFaceH4/ultrachat_200k"
+
+
+def test_eval_dataset_independent_of_eval_split():
+    """eval_dataset and eval_dataset_split are independent — both can be set."""
+    data = DataConfig(
+        eval_dataset="myorg/myrepo",
+        eval_dataset_split="test_sft[:100]",
+    )
+    assert data.eval_dataset == "myorg/myrepo"
+    assert data.eval_dataset_split == "test_sft[:100]"
+
+
+def test_eval_dataset_accepted_by_parser():
+    parser = HfArgumentParser((BakeryConfig, DataConfig, LoraConfig))
+    _, data, _ = parser.parse_args_into_dataclasses(
+        args=[
+            "--output_dir", "/tmp/t",
+            "--eval_dataset", "HuggingFaceH4/ultrachat_200k",
+            "--eval_dataset_split", "test_sft[:50]",
+        ]
+    )
+    assert data.eval_dataset == "HuggingFaceH4/ultrachat_200k"
+    assert data.eval_dataset_split == "test_sft[:50]"
+
+
 def test_bakery_config_numeric_coercion():
     """Numeric BakeryConfig fields should be coerced from strings."""
     # HfArgumentParser may pass floats as strings from YAML
