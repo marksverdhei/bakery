@@ -1,10 +1,12 @@
 """Tests for PromptBakingTrainer using a tiny GPT-2 model with LoRA."""
 
+import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig as PeftLoraConfig, get_peft_model
 
 from bakery.config import BakeryConfig
 from bakery.data import create_dataset, prompt_baking_collator
+from bakery.kl import compute_kl_divergence, disable_adapters, padding_side
 from bakery.trainer import PromptBakingTrainer
 
 
@@ -283,3 +285,99 @@ def test_prediction_step_sequential_eval_returns_triple():
     assert result[1] is None and result[2] is None
     loss = result[0]
     assert loss.dim() == 0
+
+
+# ---------------------------------------------------------------------------
+# Numerical equivalence: batched vs per-sample loop
+# ---------------------------------------------------------------------------
+
+
+def test_batched_kl_matches_per_sample_loop():
+    """Verify that the batched _compute_batched_kl produces the same result
+    as computing KL divergence one sample at a time in a loop.
+
+    This guards against regressions when refactoring the vectorized path.
+    """
+    torch.manual_seed(42)
+
+    trainer = _make_trainer(
+        prompts=["What is 2+2?", "Explain gravity"],
+        responses=["The answer is 4.", "Gravity is a fundamental force of nature."],
+        batch_size=2,
+    )
+    model = trainer.model
+
+    user_messages = ["What is 2+2?", "Explain gravity"]
+    responses = ["The answer is 4.", "Gravity is a fundamental force of nature."]
+    pairs = list(zip(user_messages, responses))
+
+    teacher_texts, student_texts, t_prompt_lens, s_prompt_lens = (
+        trainer._build_texts_and_lengths(pairs)
+    )
+
+    with padding_side(trainer.processing_class, "left"):
+        teacher_inputs = trainer._tokenize(
+            teacher_texts, return_tensors="pt", padding=True
+        ).to(model.device)
+        student_inputs = trainer._tokenize(
+            student_texts, return_tensors="pt", padding=True
+        ).to(model.device)
+
+    with torch.no_grad():
+        with disable_adapters(model):
+            teacher_logits = model(
+                **trainer._make_fwd_kwargs(model, teacher_inputs)
+            ).logits
+        student_logits = model(
+            **trainer._make_fwd_kwargs(model, student_inputs)
+        ).logits
+
+    # --- Batched path (the code under test) ---
+    batched_losses = trainer._compute_batched_kl(
+        teacher_logits,
+        student_logits,
+        teacher_inputs,
+        student_inputs,
+        t_prompt_lens,
+        s_prompt_lens,
+        len(pairs),
+    )
+    assert batched_losses is not None
+
+    # --- Reference: per-sample loop (the old approach) ---
+    per_sample_losses = []
+    t_seq_len = teacher_inputs["input_ids"].shape[1]
+    s_seq_len = student_inputs["input_ids"].shape[1]
+    t_real_lengths = teacher_inputs["attention_mask"].sum(dim=1)
+    s_real_lengths = student_inputs["attention_mask"].sum(dim=1)
+
+    for i in range(len(pairs)):
+        t_start = int(t_seq_len - t_real_lengths[i].item()) + t_prompt_lens[i]
+        s_start = int(s_seq_len - s_real_lengths[i].item()) + s_prompt_lens[i]
+        t_resp_len = t_seq_len - t_start
+        s_resp_len = s_seq_len - s_start
+        L = min(t_resp_len, s_resp_len)
+        if L <= 0:
+            continue
+
+        ts = t_start - 1  # logit position for first response token
+        ss = s_start - 1
+        t_logits_i = teacher_logits[i, ts : ts + L].unsqueeze(0)
+        s_logits_i = student_logits[i, ss : ss + L].unsqueeze(0)
+        mask_i = torch.ones(1, L, device=model.device)
+
+        loss_i = compute_kl_divergence(
+            t_logits_i.detach(), s_logits_i, mask_i,
+            trainer.kl_temperature, per_sample=True,
+        )
+        per_sample_losses.append(loss_i.squeeze(0))
+
+    assert len(per_sample_losses) == batched_losses.shape[0]
+    loop_losses = torch.stack(per_sample_losses)
+
+    assert torch.allclose(batched_losses, loop_losses, atol=1e-5), (
+        f"Batched and per-sample loop KL losses differ:\n"
+        f"  batched:  {batched_losses}\n"
+        f"  loop:     {loop_losses}\n"
+        f"  max diff: {(batched_losses - loop_losses).abs().max().item()}"
+    )
