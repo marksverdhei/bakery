@@ -1,0 +1,65 @@
+# Performance-optimized prompt baking (RTX 3090 / 24GB VRAM)
+#
+# Demonstrates all high-impact performance knobs from issue #6:
+#   1. gradient_checkpointing — trades ~20-30% wall-clock for VRAM savings,
+#      enabling larger batch sizes that more than compensate on 1B+ models.
+#   2. adamw_bnb_8bit (bitsandbytes) — cuts optimizer state by ~75%;
+#      requires `pip install bitsandbytes` or `bakery[qlora]`.
+#   3. attn_implementation: "flash_attention_2" — 2-4x attention speedup on
+#      long sequences (falls back to "sdpa" if FA2 not installed).
+#   4. per_device_train_batch_size: 4 — larger batches amortize kernel overhead;
+#      only feasible because gradient_checkpointing frees VRAM.
+#   5. gradient_accumulation_steps: 2 — effective batch size 8 without OOM.
+#
+# Usage:
+#   pip install bitsandbytes           # for 8-bit Adam (optional)
+#   pip install flash-attn             # for Flash Attention 2 (optional)
+#   bakery --config examples/performance.yaml
+
+# --- Standard TrainingArguments ---
+output_dir: "./outputs/performance"
+num_train_epochs: 3
+learning_rate: 1e-4
+per_device_train_batch_size: 4
+gradient_accumulation_steps: 2
+max_grad_norm: 1.0
+logging_steps: 5
+save_strategy: "epoch"
+gradient_checkpointing: true          # saves VRAM → allows batch_size 4
+optim: "adamw_bnb_8bit"               # 8-bit Adam; requires: pip install bitsandbytes
+bf16: true
+report_to: "none"
+seed: 42
+lr_scheduler_type: "cosine"
+warmup_ratio: 0.1
+
+# --- Prompt baking ---
+system_prompt: "You are a helpful, harmless, and honest assistant."
+num_trajectories: 4
+trajectory_length: 128
+temperature: 1.0
+sampling_temperature: 0.8
+
+# --- Model ---
+model_name_or_path: "Qwen/Qwen3-1.7B"
+torch_dtype: "bfloat16"
+# Flash Attention 2 gives 2-4x speedup on long sequences.
+# Falls back gracefully to SDPA if flash-attn is not installed:
+#   attn_implementation: "sdpa"
+attn_implementation: "flash_attention_2"
+
+# --- LoRA ---
+r: 64
+lora_alpha: 128
+# "all-linear" targets every linear layer — maximises model capacity.
+# Slower than listing specific modules but often more expressive.
+target_modules: all-linear
+lora_dropout: 0.05
+
+# --- Data ---
+training_prompts:
+  - "What is the capital of France?"
+  - "Explain photosynthesis in simple terms."
+  - "Write a haiku about the ocean."
+  - "What are the benefits of exercise?"
+  - "How does a computer work?"
