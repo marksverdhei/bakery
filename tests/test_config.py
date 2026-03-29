@@ -47,6 +47,7 @@ def test_default_lora_targets():
 # BakeryConfig.__post_init__ — string coercion
 # ---------------------------------------------------------------------------
 
+
 class TestBakeryConfigPostInit:
     def _base_kwargs(self):
         return dict(
@@ -58,13 +59,16 @@ class TestBakeryConfigPostInit:
         cfg = BakeryConfig(**self._base_kwargs())
         assert cfg.remove_unused_columns is False
 
-    @pytest.mark.parametrize("attr,value", [
-        ("learning_rate", "1e-4"),
-        ("temperature", "0.7"),
-        ("sampling_temperature", "0.8"),
-        ("warmup_ratio", "0.1"),
-        ("max_grad_norm", "1.0"),
-    ])
+    @pytest.mark.parametrize(
+        "attr,value",
+        [
+            ("learning_rate", "1e-4"),
+            ("temperature", "0.7"),
+            ("sampling_temperature", "0.8"),
+            ("warmup_ratio", "0.1"),
+            ("max_grad_norm", "1.0"),
+        ],
+    )
     def test_float_string_coerced_to_float(self, attr, value):
         """String numeric values for float fields are coerced to float."""
         kwargs = self._base_kwargs()
@@ -73,12 +77,15 @@ class TestBakeryConfigPostInit:
         assert isinstance(getattr(cfg, attr), float)
         assert getattr(cfg, attr) == pytest.approx(float(value))
 
-    @pytest.mark.parametrize("attr,value", [
-        ("num_trajectories", "4"),
-        ("trajectory_length", "128"),
-        ("logging_steps", "10"),
-        ("seed", "42"),
-    ])
+    @pytest.mark.parametrize(
+        "attr,value",
+        [
+            ("num_trajectories", "4"),
+            ("trajectory_length", "128"),
+            ("logging_steps", "10"),
+            ("seed", "42"),
+        ],
+    )
     def test_int_string_coerced_to_int(self, attr, value):
         """String numeric values for int fields are coerced to int."""
         kwargs = self._base_kwargs()
@@ -132,6 +139,7 @@ class TestBakeryConfigPostInit:
 # ---------------------------------------------------------------------------
 # LoraConfig.__post_init__ — target_modules normalization
 # ---------------------------------------------------------------------------
+
 
 class TestLoraConfigPostInit:
     def test_all_string_normalized_to_all_linear(self):
