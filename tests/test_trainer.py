@@ -190,3 +190,94 @@ def test_prompt_length_cache_multiple_prompts():
     assert len(trainer._prompt_length_cache) == 2
     assert "Q1" in trainer._prompt_length_cache
     assert "Q2" in trainer._prompt_length_cache
+
+# ---------------------------------------------------------------------------
+# prediction_step
+# ---------------------------------------------------------------------------
+
+def test_prediction_step_returns_triple():
+    """prediction_step returns (loss, None, None) for eval."""
+    trainer = _make_trainer(
+        prompts=["What is 2+2?"],
+        responses=["The answer is 4."],
+    )
+    inputs = {
+        "user_messages": ["What is 2+2?"],
+        "responses": ["The answer is 4."],
+    }
+    result = trainer.prediction_step(
+        trainer.model, inputs, prediction_loss_only=True
+    )
+    assert isinstance(result, tuple) and len(result) == 3
+    assert result[1] is None
+    assert result[2] is None
+
+
+def test_prediction_step_loss_is_scalar():
+    """prediction_step loss is a detached scalar."""
+    trainer = _make_trainer(
+        prompts=["Hello"],
+        responses=["Hi!"],
+    )
+    inputs = {"user_messages": ["Hello"], "responses": ["Hi!"]}
+    loss, _, _ = trainer.prediction_step(
+        trainer.model, inputs, prediction_loss_only=True
+    )
+    assert loss.dim() == 0
+    assert not loss.requires_grad
+
+
+def test_prediction_step_empty_inputs():
+    """prediction_step returns zero loss for empty inputs."""
+    trainer = _make_trainer(prompts=["placeholder"], responses=["placeholder"])
+    inputs = {"user_messages": [], "responses": []}
+    loss, _, _ = trainer.prediction_step(
+        trainer.model, inputs, prediction_loss_only=True
+    )
+    assert loss.item() == 0.0
+
+
+def test_prediction_step_sequential_eval_returns_triple():
+    """sequential_eval prediction_step also returns a (loss, None, None) triple."""
+    from bakery.config import BakeryConfig
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from peft import LoraConfig as PeftLoraConfig, get_peft_model
+    from bakery.data import create_dataset, prompt_baking_collator
+    from bakery.trainer import PromptBakingTrainer
+
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.chat_template = CHAT_TEMPLATE
+
+    model = AutoModelForCausalLM.from_pretrained("gpt2")
+    model = get_peft_model(
+        model,
+        PeftLoraConfig(r=4, lora_alpha=8, target_modules=["c_attn"], task_type="CAUSAL_LM"),
+    )
+
+    args = BakeryConfig(
+        output_dir="/tmp/bakery_test",
+        system_prompt="You are a helpful assistant.",
+        num_trajectories=1,
+        trajectory_length=16,
+        per_device_train_batch_size=1,
+        num_train_epochs=1,
+        logging_steps=1,
+        report_to="none",
+        use_cpu=True,
+        sequential_eval=True,
+    )
+    trainer = PromptBakingTrainer(
+        model=model,
+        args=args,
+        train_dataset=create_dataset(["Q"], ["A"]),
+        processing_class=tokenizer,
+        data_collator=prompt_baking_collator,
+    )
+
+    inputs = {"user_messages": ["Hello"], "responses": ["Hi there!"]}
+    result = trainer.prediction_step(model, inputs, prediction_loss_only=True)
+    assert isinstance(result, tuple) and len(result) == 3
+    assert result[1] is None and result[2] is None
+    loss = result[0]
+    assert loss.dim() == 0
