@@ -239,43 +239,54 @@ class PromptBakingTrainer(Trainer):
         s_seq_len = student_inputs["input_ids"].shape[1]
         t_real_lengths = teacher_inputs["attention_mask"].sum(dim=1)
         s_real_lengths = student_inputs["attention_mask"].sum(dim=1)
+        B = len(pairs)
+        V = teacher_outputs.logits.shape[-1]
 
-        losses = []
+        # Compute per-sample response start positions (in logit space, shifted -1
+        # so that logit[t] predicts token[t+1]).
+        t_starts = [
+            int(t_seq_len - t_real_lengths[i].item()) + teacher_prompt_lengths[i]
+            for i in range(B)
+        ]
+        s_starts = [
+            int(s_seq_len - s_real_lengths[i].item()) + student_prompt_lengths[i]
+            for i in range(B)
+        ]
+        # Response length for sample i: from start to seq_end (exclusive), capped
+        # at the other sequence's response length to keep teacher/student aligned.
+        t_resp_lens = [t_seq_len - 1 - (t_starts[i] - 1) for i in range(B)]
+        s_resp_lens = [s_seq_len - 1 - (s_starts[i] - 1) for i in range(B)]
+        min_resp_lens = [min(t_resp_lens[i], s_resp_lens[i]) for i in range(B)]
 
-        for i in range(len(pairs)):
-            t_pad = t_seq_len - t_real_lengths[i].item()
-            s_pad = s_seq_len - s_real_lengths[i].item()
-            t_start = int(t_pad) + teacher_prompt_lengths[i]
-            s_start = int(s_pad) + student_prompt_lengths[i]
-
-            # Logits at position t predict token t+1, so shift back by 1 to get
-            # the logits that correspond to each response token. Slice to -1
-            # because the last position predicts a token beyond the sequence.
-            t_logits = teacher_outputs.logits[i : i + 1, t_start - 1 : -1, :]
-            s_logits = student_outputs.logits[i : i + 1, s_start - 1 : -1, :]
-
-            t_mask = teacher_inputs["attention_mask"][i : i + 1, t_start:]
-            s_mask = student_inputs["attention_mask"][i : i + 1, s_start:]
-
-            min_len = min(t_logits.shape[1], s_logits.shape[1])
-            if min_len == 0:
-                continue
-
-            t_logits = t_logits[:, :min_len, :]
-            s_logits = s_logits[:, :min_len, :]
-            mask = (t_mask[:, :min_len] * s_mask[:, :min_len]).float()
-
-            loss = compute_kl_divergence(
-                t_logits.detach(), s_logits, mask, self.kl_temperature
-            )
-            losses.append(loss)
-
-        if not losses:
+        # Filter out zero-length samples (degenerate prompts/responses).
+        valid = [i for i, L in enumerate(min_resp_lens) if L > 0]
+        if not valid:
             logger.warning("No aligned logit pairs after slicing — returning zero loss")
             zero = torch.tensor(0.0, device=self.args.device, requires_grad=True)
             return (zero, None) if return_outputs else zero
 
-        total_loss = torch.stack(losses).mean()
+        max_resp_len = max(min_resp_lens[i] for i in valid)
+
+        # Build batched logit tensors [|valid|, max_resp_len, V] by copying each
+        # sample's response slice. This CPU loop is cheap (shapes only differ in
+        # sequence position); the expensive softmax/KL runs once on the batch.
+        t_batch = teacher_outputs.logits.new_zeros(len(valid), max_resp_len, V)
+        s_batch = student_outputs.logits.new_zeros(len(valid), max_resp_len, V)
+        mask_batch = teacher_outputs.logits.new_zeros(len(valid), max_resp_len)
+
+        for out_idx, i in enumerate(valid):
+            L = min_resp_lens[i]
+            ts = t_starts[i] - 1  # logit position for first response token
+            ss = s_starts[i] - 1
+            t_batch[out_idx, :L] = teacher_outputs.logits[i, ts : ts + L]
+            s_batch[out_idx, :L] = student_outputs.logits[i, ss : ss + L]
+            mask_batch[out_idx, :L] = 1.0
+
+        per_sample_losses = compute_kl_divergence(
+            t_batch.detach(), s_batch, mask_batch, self.kl_temperature,
+            per_sample=True,
+        )
+        total_loss = per_sample_losses.mean()
         return (total_loss, None) if return_outputs else total_loss
 
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
@@ -359,39 +370,47 @@ class PromptBakingTrainer(Trainer):
         s_seq_len = student_inputs["input_ids"].shape[1]
         t_real_lengths = teacher_inputs["attention_mask"].sum(dim=1)
         s_real_lengths = student_inputs["attention_mask"].sum(dim=1)
+        B = len(pairs)
+        V = teacher_logits.shape[-1]
 
-        losses = []
-        for i in range(len(pairs)):
-            t_pad = t_seq_len - t_real_lengths[i].item()
-            s_pad = s_seq_len - s_real_lengths[i].item()
-            t_start = int(t_pad) + teacher_prompt_lengths[i]
-            s_start = int(s_pad) + student_prompt_lengths[i]
+        t_starts = [
+            int(t_seq_len - t_real_lengths[i].item()) + teacher_prompt_lengths[i]
+            for i in range(B)
+        ]
+        s_starts = [
+            int(s_seq_len - s_real_lengths[i].item()) + student_prompt_lengths[i]
+            for i in range(B)
+        ]
+        t_resp_lens = [t_seq_len - 1 - (t_starts[i] - 1) for i in range(B)]
+        s_resp_lens = [s_seq_len - 1 - (s_starts[i] - 1) for i in range(B)]
+        min_resp_lens = [min(t_resp_lens[i], s_resp_lens[i]) for i in range(B)]
 
-            t_logits = teacher_logits[i : i + 1, t_start - 1 : -1, :].to(model.device)
-            s_logits = student_outputs.logits[i : i + 1, s_start - 1 : -1, :]
-            t_mask = teacher_inputs["attention_mask"][i : i + 1, t_start:]
-            s_mask = student_inputs["attention_mask"][i : i + 1, s_start:]
-
-            min_len = min(t_logits.shape[1], s_logits.shape[1])
-            if min_len == 0:
-                continue
-            mask = (t_mask[:, :min_len] * s_mask[:, :min_len]).float()
-            losses.append(
-                compute_kl_divergence(
-                    t_logits[:, :min_len, :],
-                    s_logits[:, :min_len, :],
-                    mask,
-                    self.kl_temperature,
-                )
-            )
-
-        if not losses:
+        valid = [i for i, L in enumerate(min_resp_lens) if L > 0]
+        if not valid:
             return (
                 torch.tensor(0.0, device=self.args.device, requires_grad=True),
                 None,
                 None,
             )
-        return (torch.stack(losses).mean().detach(), None, None)
+
+        max_resp_len = max(min_resp_lens[i] for i in valid)
+        dev = student_outputs.logits.device
+        t_batch = student_outputs.logits.new_zeros(len(valid), max_resp_len, V)
+        s_batch = student_outputs.logits.new_zeros(len(valid), max_resp_len, V)
+        mask_batch = student_outputs.logits.new_zeros(len(valid), max_resp_len)
+
+        for out_idx, i in enumerate(valid):
+            L = min_resp_lens[i]
+            ts = t_starts[i] - 1
+            ss = s_starts[i] - 1
+            t_batch[out_idx, :L] = teacher_logits[i, ts : ts + L].to(dev)
+            s_batch[out_idx, :L] = student_outputs.logits[i, ss : ss + L]
+            mask_batch[out_idx, :L] = 1.0
+
+        per_sample_losses = compute_kl_divergence(
+            t_batch, s_batch, mask_batch, self.kl_temperature, per_sample=True
+        )
+        return (per_sample_losses.mean().detach(), None, None)
 
     def training_step(self, model, inputs, num_items_in_batch=None) -> torch.Tensor:
         """Generate trajectories on-the-fly if no precomputed responses."""
