@@ -75,6 +75,7 @@ def _has_bitsandbytes():
     except ImportError:
         return False
 
+
 # Rough upper-bound baselines (seconds) for regression detection.
 # Intentionally generous to avoid flaky failures.
 BASELINES = {

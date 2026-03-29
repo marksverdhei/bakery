@@ -1,9 +1,24 @@
-from transformers import HfArgumentParser
+import sys
+
+import pytest
+
 from bakery.config import BakeryConfig, DataConfig, LoraConfig
+
+_HF_PARSER_BROKEN = sys.version_info >= (3, 14)
+
+
+def _make_hf_parser():
+    if _HF_PARSER_BROKEN:
+        pytest.skip(
+            "HfArgumentParser incompatible with Python 3.14+ (transformers bug)"
+        )
+    from transformers import HfArgumentParser
+
+    return HfArgumentParser((BakeryConfig, DataConfig, LoraConfig))
 
 
 def test_parser_accepts_flat_args():
-    parser = HfArgumentParser((BakeryConfig, DataConfig, LoraConfig))
+    parser = _make_hf_parser()
     baking, data, lora = parser.parse_args_into_dataclasses(
         args=[
             "--output_dir",
@@ -31,6 +46,7 @@ def test_default_lora_targets():
 # ---------------------------------------------------------------------------
 # LoraConfig.__post_init__ normalisation — target_modules: all / all-linear
 # ---------------------------------------------------------------------------
+
 
 def test_lora_target_modules_all_string_normalised():
     """YAML scalar 'all' should become PEFT's 'all-linear' string."""
@@ -67,6 +83,7 @@ def test_lora_target_modules_explicit_list_unchanged():
 # DataConfig — eval_dataset (separate HF dataset for validation loss)
 # ---------------------------------------------------------------------------
 
+
 def test_eval_dataset_defaults_to_none():
     data = DataConfig.__new__(DataConfig)
     data.__init__()
@@ -89,12 +106,15 @@ def test_eval_dataset_independent_of_eval_split():
 
 
 def test_eval_dataset_accepted_by_parser():
-    parser = HfArgumentParser((BakeryConfig, DataConfig, LoraConfig))
+    parser = _make_hf_parser()
     _, data, _ = parser.parse_args_into_dataclasses(
         args=[
-            "--output_dir", "/tmp/t",
-            "--eval_dataset", "HuggingFaceH4/ultrachat_200k",
-            "--eval_dataset_split", "test_sft[:50]",
+            "--output_dir",
+            "/tmp/t",
+            "--eval_dataset",
+            "HuggingFaceH4/ultrachat_200k",
+            "--eval_dataset_split",
+            "test_sft[:50]",
         ]
     )
     assert data.eval_dataset == "HuggingFaceH4/ultrachat_200k"

@@ -3,21 +3,33 @@
 from __future__ import annotations
 
 import argparse
-import os
-import tempfile
-import textwrap
+import sys
 
 import pytest
 import yaml
 
-from transformers import HfArgumentParser
-
 from bakery.config import BakeryConfig, DataConfig, LoraConfig
+
+# HfArgumentParser crashes on Python 3.14+ due to a % format string bug in
+# transformers' TrainingArguments.use_liger_kernel help text.
+_HF_PARSER_BROKEN = sys.version_info >= (3, 14)
+
+
+def _make_hf_parser():
+    """Create HfArgumentParser, skipping if broken on this Python version."""
+    if _HF_PARSER_BROKEN:
+        pytest.skip(
+            "HfArgumentParser incompatible with Python 3.14+ (transformers bug)"
+        )
+    from transformers import HfArgumentParser
+
+    return HfArgumentParser((BakeryConfig, DataConfig, LoraConfig))
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _write_yaml(content: dict, path: str) -> None:
     with open(path, "w") as f:
@@ -43,10 +55,11 @@ def _minimal_yaml(tmp_path, extra: dict | None = None) -> str:
 # YAML loading
 # ---------------------------------------------------------------------------
 
+
 class TestYamlLoading:
     def test_minimal_yaml_parsed(self, tmp_path):
         path = _minimal_yaml(tmp_path)
-        parser = HfArgumentParser((BakeryConfig, DataConfig, LoraConfig))
+        parser = _make_hf_parser()
         baking, data, lora = parser.parse_yaml_file(path, allow_extra_keys=True)
         assert baking.system_prompt == "You are helpful."
         assert data.model_name_or_path == "gpt2"
@@ -54,13 +67,13 @@ class TestYamlLoading:
     def test_output_dir_from_yaml(self, tmp_path):
         out_dir = str(tmp_path / "myoutput")
         path = _minimal_yaml(tmp_path, {"output_dir": out_dir})
-        parser = HfArgumentParser((BakeryConfig, DataConfig, LoraConfig))
+        parser = _make_hf_parser()
         baking, _, _ = parser.parse_yaml_file(path, allow_extra_keys=True)
         assert baking.output_dir == out_dir
 
     def test_lora_config_from_yaml(self, tmp_path):
         path = _minimal_yaml(tmp_path, {"r": 16, "lora_alpha": 32})
-        parser = HfArgumentParser((BakeryConfig, DataConfig, LoraConfig))
+        parser = _make_hf_parser()
         _, _, lora = parser.parse_yaml_file(path, allow_extra_keys=True)
         assert lora.r == 16
         assert lora.lora_alpha == 32
@@ -68,27 +81,27 @@ class TestYamlLoading:
     def test_numeric_floats_as_strings(self, tmp_path):
         """HfArgumentParser from YAML may deliver learning_rate as string."""
         path = _minimal_yaml(tmp_path, {"learning_rate": "3e-4"})
-        parser = HfArgumentParser((BakeryConfig, DataConfig, LoraConfig))
+        parser = _make_hf_parser()
         # BakeryConfig.__post_init__ should coerce string → float
         baking, _, _ = parser.parse_yaml_file(path, allow_extra_keys=True)
         assert abs(baking.learning_rate - 3e-4) < 1e-10
 
     def test_target_modules_all_normalized(self, tmp_path):
         path = _minimal_yaml(tmp_path, {"target_modules": "all"})
-        parser = HfArgumentParser((BakeryConfig, DataConfig, LoraConfig))
+        parser = _make_hf_parser()
         _, _, lora = parser.parse_yaml_file(path, allow_extra_keys=True)
         assert lora.target_modules == "all-linear"
 
     def test_target_modules_list_all_normalized(self, tmp_path):
         path = _minimal_yaml(tmp_path, {"target_modules": ["all"]})
-        parser = HfArgumentParser((BakeryConfig, DataConfig, LoraConfig))
+        parser = _make_hf_parser()
         _, _, lora = parser.parse_yaml_file(path, allow_extra_keys=True)
         assert lora.target_modules == "all-linear"
 
     def test_extra_keys_allowed(self, tmp_path):
         """allow_extra_keys=True should not raise on unknown fields."""
         path = _minimal_yaml(tmp_path, {"unknown_field_xyz": "ignored"})
-        parser = HfArgumentParser((BakeryConfig, DataConfig, LoraConfig))
+        parser = _make_hf_parser()
         # Should not raise
         baking, data, lora = parser.parse_yaml_file(path, allow_extra_keys=True)
         assert baking.system_prompt == "You are helpful."
@@ -97,6 +110,7 @@ class TestYamlLoading:
 # ---------------------------------------------------------------------------
 # Pre-parser (--config extraction)
 # ---------------------------------------------------------------------------
+
 
 class TestPreParser:
     """Test the pre_parser that extracts --config before HfArgumentParser."""
@@ -114,7 +128,14 @@ class TestPreParser:
     def test_remaining_args_after_config(self, tmp_path):
         parser = self._make_pre_parser()
         _, remaining = parser.parse_known_args(
-            ["--config", "my.yaml", "--learning_rate", "1e-4", "--num_train_epochs", "5"]
+            [
+                "--config",
+                "my.yaml",
+                "--learning_rate",
+                "1e-4",
+                "--num_train_epochs",
+                "5",
+            ]
         )
         assert "--learning_rate" in remaining
         assert "1e-4" in remaining
@@ -136,13 +157,14 @@ class TestPreParser:
 # CLI override merging
 # ---------------------------------------------------------------------------
 
+
 class TestCliOverrideMerging:
     """Test that CLI args override YAML config fields correctly."""
 
     def _parse_with_overrides(self, tmp_path, yaml_extra: dict, cli_args: list):
         """Simulate the CLI's YAML + CLI override merging."""
         path = _minimal_yaml(tmp_path, yaml_extra)
-        parser = HfArgumentParser((BakeryConfig, DataConfig, LoraConfig))
+        parser = _make_hf_parser()
         baking, data, lora = parser.parse_yaml_file(path, allow_extra_keys=True)
 
         if not cli_args:
@@ -153,7 +175,7 @@ class TestCliOverrideMerging:
             if arg.startswith("--"):
                 explicit_keys.add(arg.lstrip("-").replace("-", "_"))
 
-        override_parser = HfArgumentParser((BakeryConfig, DataConfig, LoraConfig))
+        override_parser = _make_hf_parser()
         overrides = override_parser.parse_args_into_dataclasses(
             args=["--output_dir", baking.output_dir] + cli_args,
             return_remaining_strings=True,

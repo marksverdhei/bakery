@@ -1,9 +1,7 @@
 """Tests for bakery.deps — auto-install optional dependencies."""
 
-import importlib
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
-import pytest
 
 from bakery.deps import (
     _is_offline,
@@ -16,6 +14,7 @@ from bakery.deps import (
 # ---------------------------------------------------------------------------
 # _is_offline
 # ---------------------------------------------------------------------------
+
 
 class TestIsOffline:
     def test_offline_when_env_set_to_one(self, monkeypatch):
@@ -38,6 +37,7 @@ class TestIsOffline:
 # ---------------------------------------------------------------------------
 # _is_installed
 # ---------------------------------------------------------------------------
+
 
 class TestIsInstalled:
     def test_returns_true_for_installed_package(self):
@@ -63,6 +63,7 @@ class TestIsInstalled:
 # _install
 # ---------------------------------------------------------------------------
 
+
 class TestInstall:
     def test_returns_true_on_success(self):
         with patch("subprocess.check_call", return_value=0):
@@ -71,12 +72,16 @@ class TestInstall:
 
     def test_returns_false_on_failure(self):
         import subprocess
-        with patch("subprocess.check_call", side_effect=subprocess.CalledProcessError(1, "pip")):
+
+        with patch(
+            "subprocess.check_call", side_effect=subprocess.CalledProcessError(1, "pip")
+        ):
             result = _install("some-package")
         assert result is False
 
     def test_calls_pip_install(self):
         import sys
+
         with patch("subprocess.check_call") as mock_call:
             _install("my-pkg")
         args = mock_call.call_args[0][0]
@@ -96,6 +101,7 @@ class TestInstall:
 # ---------------------------------------------------------------------------
 # ensure_deps
 # ---------------------------------------------------------------------------
+
 
 class TestEnsureDeps:
     def test_does_nothing_when_offline(self, monkeypatch):

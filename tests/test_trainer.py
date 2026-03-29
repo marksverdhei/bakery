@@ -191,9 +191,11 @@ def test_prompt_length_cache_multiple_prompts():
     assert "Q1" in trainer._prompt_length_cache
     assert "Q2" in trainer._prompt_length_cache
 
+
 # ---------------------------------------------------------------------------
 # prediction_step
 # ---------------------------------------------------------------------------
+
 
 def test_prediction_step_returns_triple():
     """prediction_step returns (loss, None, None) for eval."""
@@ -205,9 +207,7 @@ def test_prediction_step_returns_triple():
         "user_messages": ["What is 2+2?"],
         "responses": ["The answer is 4."],
     }
-    result = trainer.prediction_step(
-        trainer.model, inputs, prediction_loss_only=True
-    )
+    result = trainer.prediction_step(trainer.model, inputs, prediction_loss_only=True)
     assert isinstance(result, tuple) and len(result) == 3
     assert result[1] is None
     assert result[2] is None
@@ -252,7 +252,9 @@ def test_prediction_step_sequential_eval_returns_triple():
     model = AutoModelForCausalLM.from_pretrained("gpt2")
     model = get_peft_model(
         model,
-        PeftLoraConfig(r=4, lora_alpha=8, target_modules=["c_attn"], task_type="CAUSAL_LM"),
+        PeftLoraConfig(
+            r=4, lora_alpha=8, target_modules=["c_attn"], task_type="CAUSAL_LM"
+        ),
     )
 
     args = BakeryConfig(

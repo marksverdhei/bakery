@@ -1,8 +1,6 @@
 import json
 import os
 import tempfile
-from dataclasses import dataclass, field
-from typing import Optional, List
 
 import pytest
 
@@ -129,8 +127,18 @@ def test_load_json_wrapped():
         os.unlink(path)
 
 
-@pytest.mark.parametrize("key", ["data", "samples", "completions", "training_samples",
-                                  "training_prompts", "prompts", "questions"])
+@pytest.mark.parametrize(
+    "key",
+    [
+        "data",
+        "samples",
+        "completions",
+        "training_samples",
+        "training_prompts",
+        "prompts",
+        "questions",
+    ],
+)
 def test_load_json_wrapped_all_keys(tmp_path, key):
     """All supported wrapper keys unwrap correctly."""
     f = tmp_path / "data.json"
@@ -171,6 +179,7 @@ def test_load_json_output_key(tmp_path):
 # load_data
 # ---------------------------------------------------------------------------
 
+
 def test_load_data_from_training_prompts(tmp_path):
     cfg = _make_data_config(training_prompts=["Hello", "World"])
     prompts, responses = load_data(cfg)
@@ -205,6 +214,7 @@ def test_load_data_raises_without_source():
 # ---------------------------------------------------------------------------
 # load_corpus
 # ---------------------------------------------------------------------------
+
 
 def test_load_corpus_none_when_no_file():
     cfg = _make_data_config()
@@ -263,6 +273,7 @@ def test_load_corpus_custom_format(tmp_path):
 # build_system_prompt
 # ---------------------------------------------------------------------------
 
+
 def test_build_system_prompt_direct():
     bc = _make_baking_config(system_prompt="You are helpful.")
     dc = _make_data_config()
@@ -297,6 +308,7 @@ def test_build_system_prompt_raises_without_any_source():
 # ---------------------------------------------------------------------------
 # load_eval_data
 # ---------------------------------------------------------------------------
+
 
 def test_load_eval_data_none():
     result = load_eval_data(None)

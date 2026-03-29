@@ -1,7 +1,6 @@
 """Tests for PromptBakingTrainer format helpers and _generate_trajectory."""
 
 import pytest
-import torch
 from unittest.mock import patch, MagicMock
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig as PeftLoraConfig, get_peft_model
@@ -56,6 +55,7 @@ def _make_trainer(system_prompt="Be helpful.", num_trajectories=1):
 # _format_prompted
 # ---------------------------------------------------------------------------
 
+
 class TestFormatPrompted:
     def test_includes_system_prompt(self):
         trainer = _make_trainer(system_prompt="Custom system.")
@@ -81,6 +81,7 @@ class TestFormatPrompted:
 # ---------------------------------------------------------------------------
 # _format_unprompted
 # ---------------------------------------------------------------------------
+
 
 class TestFormatUnprompted:
     def test_excludes_system_prompt(self):
@@ -108,6 +109,7 @@ class TestFormatUnprompted:
 # ---------------------------------------------------------------------------
 # _generate_trajectory
 # ---------------------------------------------------------------------------
+
 
 class TestGenerateTrajectory:
     def test_returns_string(self):
@@ -174,6 +176,7 @@ class TestGenerateTrajectory:
 # _tokenize
 # ---------------------------------------------------------------------------
 
+
 class TestTokenize:
     def test_tokenize_returns_dict_with_input_ids(self):
         trainer = _make_trainer()
@@ -190,7 +193,10 @@ class TestTokenize:
             "Hello", add_special_tokens=True, return_tensors="pt"
         )
         # Without special tokens should produce ≤ tokens than with
-        assert result_no_special["input_ids"].shape[1] <= with_special["input_ids"].shape[1]
+        assert (
+            result_no_special["input_ids"].shape[1]
+            <= with_special["input_ids"].shape[1]
+        )
 
     def test_tokenize_respects_max_seq_length(self):
         """When max_seq_length is set, output is truncated."""
@@ -212,13 +218,16 @@ class TestTokenize:
     def test_tokenize_accepts_list_of_strings(self):
         """Batch tokenization with a list works."""
         trainer = _make_trainer()
-        result = trainer._tokenize(["Hello", "World"], return_tensors="pt", padding=True)
+        result = trainer._tokenize(
+            ["Hello", "World"], return_tensors="pt", padding=True
+        )
         assert result["input_ids"].shape[0] == 2
 
 
 # ---------------------------------------------------------------------------
 # kl_temperature is taken from args.temperature
 # ---------------------------------------------------------------------------
+
 
 class TestKLTemperature:
     def test_kl_temperature_matches_args_temperature(self):
@@ -251,6 +260,7 @@ class TestKLTemperature:
             temperature=2.5,
         )
         from bakery.data import create_dataset, prompt_baking_collator
+
         dataset = create_dataset(["Q?"])
         trainer = PromptBakingTrainer(
             model=model,
@@ -266,6 +276,7 @@ class TestKLTemperature:
 # generation_config
 # ---------------------------------------------------------------------------
 
+
 class TestGenerationConfig:
     def test_generation_config_max_new_tokens(self):
         trainer = _make_trainer()
@@ -273,7 +284,9 @@ class TestGenerationConfig:
 
     def test_generation_config_temperature(self):
         trainer = _make_trainer()
-        assert trainer.generation_config.temperature == pytest.approx(trainer.sampling_temperature)
+        assert trainer.generation_config.temperature == pytest.approx(
+            trainer.sampling_temperature
+        )
 
     def test_generation_config_do_sample(self):
         trainer = _make_trainer()
@@ -281,12 +294,16 @@ class TestGenerationConfig:
 
     def test_generation_config_pad_token_id(self):
         trainer = _make_trainer()
-        assert trainer.generation_config.pad_token_id == trainer.processing_class.pad_token_id
+        assert (
+            trainer.generation_config.pad_token_id
+            == trainer.processing_class.pad_token_id
+        )
 
 
 # ---------------------------------------------------------------------------
 # __init__ attributes
 # ---------------------------------------------------------------------------
+
 
 class TestInitAttributes:
     def test_system_prompt_stored(self):

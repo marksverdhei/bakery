@@ -50,6 +50,7 @@ def test_kl_temperature_scaling():
 # per_sample=True
 # ---------------------------------------------------------------------------
 
+
 def test_kl_per_sample_returns_batch_tensor():
     """per_sample=True should return a 1-D tensor of length batch_size."""
     B, T, V = 4, 6, 50
@@ -105,6 +106,7 @@ def test_kl_per_sample_empty_mask_sample_is_zero():
 # disable_adapters
 # ---------------------------------------------------------------------------
 
+
 def test_disable_adapters_calls_disable_then_enable():
     """disable_adapters should call disable_adapter_layers() on entry."""
     model = MagicMock()
@@ -127,6 +129,7 @@ def test_disable_adapters_enables_on_exception():
 # ---------------------------------------------------------------------------
 # padding_side
 # ---------------------------------------------------------------------------
+
 
 def test_padding_side_context_manager():
     """padding_side restores original value, even on exception."""

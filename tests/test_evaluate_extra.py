@@ -10,6 +10,7 @@ from bakery.evaluate import evaluate_model
 
 def _make_tokenizer():
     from transformers import AutoTokenizer
+
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.chat_template = (
@@ -27,7 +28,9 @@ def _make_model(response_text: str, tokenizer):
     model.device = torch.device("cpu")
 
     prompt_ids = tokenizer("x", return_tensors="pt")["input_ids"]
-    response_ids = tokenizer(response_text, add_special_tokens=False, return_tensors="pt")["input_ids"]
+    response_ids = tokenizer(
+        response_text, add_special_tokens=False, return_tensors="pt"
+    )["input_ids"]
 
     def fake_generate(**kwargs):
         return torch.cat([kwargs.get("input_ids", prompt_ids), response_ids], dim=1)
@@ -61,7 +64,9 @@ class TestEvaluateModelResults:
         model = _make_model("UPPERCASE ANSWER", tokenizer)
         result = evaluate_model(model, tokenizer, [("q", ["uppercase"])])
         # response is lowercased internally
-        assert result["results"][0]["response"] == result["results"][0]["response"].lower()
+        assert (
+            result["results"][0]["response"] == result["results"][0]["response"].lower()
+        )
 
     def test_multiple_pairs_correct_count(self):
         """2 correct out of 3 → accuracy = 2/3."""
@@ -69,8 +74,11 @@ class TestEvaluateModelResults:
         model = _make_model("paris", tokenizer)
         qa_pairs = [
             ("Capital of France?", ["paris"]),
-            ("Capital of Germany?", ["paris"]),   # wrong keyword, but response contains "paris"
-            ("Capital of UK?", ["london"]),        # "paris" ≠ "london" → wrong
+            (
+                "Capital of Germany?",
+                ["paris"],
+            ),  # wrong keyword, but response contains "paris"
+            ("Capital of UK?", ["london"]),  # "paris" ≠ "london" → wrong
         ]
         result = evaluate_model(model, tokenizer, qa_pairs)
         assert result["total"] == 3
@@ -101,11 +109,15 @@ class TestEvaluateSystemPrompt:
 
         tokenizer.apply_chat_template = capturing_apply
 
-        evaluate_model(model, tokenizer, [("question", ["response"])], system_prompt="Be helpful.")
+        evaluate_model(
+            model, tokenizer, [("question", ["response"])], system_prompt="Be helpful."
+        )
 
         roles = [m["role"] for m in captured_messages]
         assert "system" in roles
-        system_content = next(m["content"] for m in captured_messages if m["role"] == "system")
+        system_content = next(
+            m["content"] for m in captured_messages if m["role"] == "system"
+        )
         assert system_content == "Be helpful."
 
     def test_no_system_message_when_prompt_not_set(self):
