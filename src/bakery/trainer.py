@@ -145,6 +145,58 @@ class PromptBakingTrainer(Trainer):
         )
         return response.strip()
 
+    def _generate_trajectories_batched(
+        self, user_messages: list[str], num_trajectories: int
+    ) -> list[tuple[str, str]]:
+        """Generate multiple trajectories in a single batched model.generate call.
+
+        Repeats each user message num_trajectories times, pads all prompts to
+        the same length using left-padding (so generated tokens align at the
+        right), runs a single model.generate, then decodes and pairs results.
+
+        Returns:
+            List of (user_message, response) pairs, only for non-empty responses.
+        """
+        if not user_messages:
+            return []
+
+        # Build one prompt per (message, trajectory) pair
+        prompts = [
+            self._format_prompted(msg)
+            for msg in user_messages
+            for _ in range(num_trajectories)
+        ]
+        repeated_msgs = [msg for msg in user_messages for _ in range(num_trajectories)]
+
+        with padding_side(self.processing_class, "left"):
+            inputs = self._tokenize(prompts, return_tensors="pt", padding=True).to(
+                self.model.device
+            )
+
+        padded_prompt_length = inputs["input_ids"].shape[1]
+
+        was_training = self.model.training
+        self.model.eval()
+
+        with torch.no_grad():
+            with disable_adapters(self.model):
+                outputs = self.model.generate(
+                    **inputs, generation_config=self.generation_config
+                )
+
+        if was_training:
+            self.model.train()
+
+        results = []
+        for i, (msg, output_ids) in enumerate(zip(repeated_msgs, outputs)):
+            response = self.processing_class.decode(
+                output_ids[padded_prompt_length:], skip_special_tokens=True
+            ).strip()
+            if response:
+                results.append((msg, response))
+
+        return results
+
     # -- Loss computation --
 
     def compute_loss(
@@ -414,12 +466,11 @@ class PromptBakingTrainer(Trainer):
                 self.num_trajectories,
             )
 
-        for user_msg in user_messages:
-            for _ in range(self.num_trajectories):
-                response = self._generate_trajectory(user_msg)
-                if response.strip():
-                    all_user_messages.append(user_msg)
-                    all_responses.append(response)
+        for msg, resp in self._generate_trajectories_batched(
+            user_messages, self.num_trajectories
+        ):
+            all_user_messages.append(msg)
+            all_responses.append(resp)
 
         if not all_responses:
             logger.warning("No valid trajectories generated — returning zero loss")
