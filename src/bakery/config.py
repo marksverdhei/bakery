@@ -175,6 +175,15 @@ class DataConfig:
             "Uses the same 'dataset' source. Combine with eval_strategy/eval_steps."
         },
     )
+    eval_dataset: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Separate HuggingFace dataset ID or local JSON file to use for validation loss. "
+            "When set, takes precedence over eval_dataset_split. "
+            "Pair with eval_dataset_split to select a non-default split "
+            "(e.g. eval_dataset='HuggingFaceH4/ultrachat_200k', eval_dataset_split='test_sft[:100]')."
+        },
+    )
 
     # Evaluation
     eval_file: Optional[str] = field(
