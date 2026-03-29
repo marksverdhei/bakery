@@ -44,39 +44,124 @@ def test_default_lora_targets():
 
 
 # ---------------------------------------------------------------------------
-# LoraConfig.__post_init__ normalisation — target_modules: all / all-linear
+# BakeryConfig.__post_init__ — string coercion
 # ---------------------------------------------------------------------------
 
 
-def test_lora_target_modules_all_string_normalised():
-    """YAML scalar 'all' should become PEFT's 'all-linear' string."""
-    lora = LoraConfig(target_modules="all")
-    assert lora.target_modules == "all-linear"
+class TestBakeryConfigPostInit:
+    def _base_kwargs(self):
+        return dict(
+            output_dir="/tmp/test",
+            system_prompt="Be helpful.",
+        )
+
+    def test_remove_unused_columns_always_false(self):
+        cfg = BakeryConfig(**self._base_kwargs())
+        assert cfg.remove_unused_columns is False
+
+    @pytest.mark.parametrize(
+        "attr,value",
+        [
+            ("learning_rate", "1e-4"),
+            ("temperature", "0.7"),
+            ("sampling_temperature", "0.8"),
+            ("warmup_ratio", "0.1"),
+            ("max_grad_norm", "1.0"),
+        ],
+    )
+    def test_float_string_coerced_to_float(self, attr, value):
+        """String numeric values for float fields are coerced to float."""
+        kwargs = self._base_kwargs()
+        kwargs[attr] = value
+        cfg = BakeryConfig(**kwargs)
+        assert isinstance(getattr(cfg, attr), float)
+        assert getattr(cfg, attr) == pytest.approx(float(value))
+
+    @pytest.mark.parametrize(
+        "attr,value",
+        [
+            ("num_trajectories", "4"),
+            ("trajectory_length", "128"),
+            ("logging_steps", "10"),
+            ("seed", "42"),
+        ],
+    )
+    def test_int_string_coerced_to_int(self, attr, value):
+        """String numeric values for int fields are coerced to int."""
+        kwargs = self._base_kwargs()
+        kwargs[attr] = value
+        cfg = BakeryConfig(**kwargs)
+        assert isinstance(getattr(cfg, attr), int)
+        assert getattr(cfg, attr) == int(value)
+
+    def test_invalid_float_string_raises(self):
+        kwargs = self._base_kwargs()
+        kwargs["learning_rate"] = "not-a-number"
+        with pytest.raises(ValueError, match="learning_rate"):
+            BakeryConfig(**kwargs)
+
+    def test_invalid_int_string_raises(self):
+        kwargs = self._base_kwargs()
+        kwargs["num_trajectories"] = "not-an-int"
+        with pytest.raises(ValueError, match="num_trajectories"):
+            BakeryConfig(**kwargs)
+
+    def test_native_float_unchanged(self):
+        """Float values passed as float are not modified."""
+        kwargs = self._base_kwargs()
+        kwargs["learning_rate"] = 5e-5
+        cfg = BakeryConfig(**kwargs)
+        assert cfg.learning_rate == pytest.approx(5e-5)
+
+    def test_system_prompt_file_loaded(self, tmp_path):
+        """system_prompt is loaded from file when system_prompt is None."""
+        prompt_file = tmp_path / "prompt.txt"
+        prompt_file.write_text("  You are a robot.  ")
+        cfg = BakeryConfig(
+            output_dir="/tmp/test",
+            system_prompt=None,
+            system_prompt_file=str(prompt_file),
+        )
+        assert cfg.system_prompt == "You are a robot."
+
+    def test_system_prompt_takes_priority_over_file(self, tmp_path):
+        """Explicit system_prompt takes priority — file is not read."""
+        prompt_file = tmp_path / "prompt.txt"
+        prompt_file.write_text("From file.")
+        cfg = BakeryConfig(
+            output_dir="/tmp/test",
+            system_prompt="Direct prompt.",
+            system_prompt_file=str(prompt_file),
+        )
+        assert cfg.system_prompt == "Direct prompt."
 
 
-def test_lora_target_modules_all_list_normalised():
-    """YAML list ['all'] should become the string 'all-linear'."""
-    lora = LoraConfig(target_modules=["all"])
-    assert lora.target_modules == "all-linear"
+# ---------------------------------------------------------------------------
+# LoraConfig.__post_init__ — target_modules normalization
+# ---------------------------------------------------------------------------
 
 
-def test_lora_target_modules_all_linear_list_normalised():
-    """['all-linear'] list should be unwrapped to the bare string."""
-    lora = LoraConfig(target_modules=["all-linear"])
-    assert lora.target_modules == "all-linear"
+class TestLoraConfigPostInit:
+    def test_all_string_normalized_to_all_linear(self):
+        lora = LoraConfig(target_modules="all")
+        assert lora.target_modules == "all-linear"
 
+    def test_all_in_list_normalized(self):
+        lora = LoraConfig(target_modules=["all"])
+        assert lora.target_modules == "all-linear"
 
-def test_lora_target_modules_all_linear_string_unchanged():
-    """Passing 'all-linear' string directly should be kept as-is."""
-    lora = LoraConfig(target_modules="all-linear")
-    assert lora.target_modules == "all-linear"
+    def test_all_linear_in_list_normalized_to_string(self):
+        lora = LoraConfig(target_modules=["all-linear"])
+        assert lora.target_modules == "all-linear"
 
+    def test_all_linear_string_unchanged(self):
+        lora = LoraConfig(target_modules="all-linear")
+        assert lora.target_modules == "all-linear"
 
-def test_lora_target_modules_explicit_list_unchanged():
-    """An explicit list of module names should not be normalised."""
-    modules = ["q_proj", "v_proj"]
-    lora = LoraConfig(target_modules=modules)
-    assert lora.target_modules == modules
+    def test_explicit_module_list_unchanged(self):
+        modules = ["q_proj", "k_proj"]
+        lora = LoraConfig(target_modules=modules)
+        assert lora.target_modules == modules
 
 
 # ---------------------------------------------------------------------------
@@ -119,20 +204,3 @@ def test_eval_dataset_accepted_by_parser():
     )
     assert data.eval_dataset == "HuggingFaceH4/ultrachat_200k"
     assert data.eval_dataset_split == "test_sft[:50]"
-
-
-def test_bakery_config_numeric_coercion():
-    """Numeric BakeryConfig fields should be coerced from strings."""
-    # HfArgumentParser may pass floats as strings from YAML
-    config = BakeryConfig(
-        output_dir="/tmp/test",
-        learning_rate="1e-4",
-        temperature="0.8",
-        num_trajectories="4",
-        trajectory_length="128",
-    )
-    assert isinstance(config.learning_rate, float)
-    assert abs(config.learning_rate - 1e-4) < 1e-10
-    assert isinstance(config.temperature, float)
-    assert config.num_trajectories == 4
-    assert config.trajectory_length == 128
