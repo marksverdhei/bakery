@@ -66,6 +66,15 @@ SAMPLE_RESPONSES = [
 USE_GPU = torch.cuda.is_available()
 DEVICE = "cuda" if USE_GPU else "cpu"
 
+
+def _has_bitsandbytes():
+    try:
+        import bitsandbytes  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
 # Rough upper-bound baselines (seconds) for regression detection.
 # Intentionally generous to avoid flaky failures.
 BASELINES = {
@@ -568,6 +577,8 @@ def test_bench_gpu_compute_loss():
     """Measure compute_loss on Qwen 3.5 9B QLoRA (batch=2)."""
     if not USE_GPU:
         pytest.skip("GPU not available")
+    if not _has_bitsandbytes():
+        pytest.skip("bitsandbytes not installed (pip install bitsandbytes)")
 
     trainer = _get_gpu_trainer()
     inputs = {
@@ -613,6 +624,8 @@ def test_bench_gpu_multi_step():
     """Measure 3 training steps on Qwen 3.5 9B QLoRA."""
     if not USE_GPU:
         pytest.skip("GPU not available")
+    if not _has_bitsandbytes():
+        pytest.skip("bitsandbytes not installed (pip install bitsandbytes)")
 
     n_steps = 3
     trainer = _get_gpu_trainer()
