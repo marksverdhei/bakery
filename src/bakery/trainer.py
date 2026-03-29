@@ -193,7 +193,12 @@ class PromptBakingTrainer(Trainer):
             teacher_prompt_lengths.append(t_len)
             student_prompt_lengths.append(s_len)
 
-        return teacher_texts, student_texts, teacher_prompt_lengths, student_prompt_lengths
+        return (
+            teacher_texts,
+            student_texts,
+            teacher_prompt_lengths,
+            student_prompt_lengths,
+        )
 
     def _make_fwd_kwargs(self, model, tok_inputs):
         """Build forward-pass keyword arguments, handling token_type_ids."""
@@ -274,7 +279,10 @@ class PromptBakingTrainer(Trainer):
             mask_batch[out_idx, :L] = 1.0
 
         per_sample_losses = compute_kl_divergence(
-            t_batch.detach(), s_batch, mask_batch, self.kl_temperature,
+            t_batch.detach(),
+            s_batch,
+            mask_batch,
+            self.kl_temperature,
             per_sample=True,
         )
         return per_sample_losses

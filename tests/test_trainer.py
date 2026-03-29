@@ -328,9 +328,7 @@ def test_batched_kl_matches_per_sample_loop():
             teacher_logits = model(
                 **trainer._make_fwd_kwargs(model, teacher_inputs)
             ).logits
-        student_logits = model(
-            **trainer._make_fwd_kwargs(model, student_inputs)
-        ).logits
+        student_logits = model(**trainer._make_fwd_kwargs(model, student_inputs)).logits
 
     # --- Batched path (the code under test) ---
     batched_losses = trainer._compute_batched_kl(
@@ -367,8 +365,11 @@ def test_batched_kl_matches_per_sample_loop():
         mask_i = torch.ones(1, L, device=model.device)
 
         loss_i = compute_kl_divergence(
-            t_logits_i.detach(), s_logits_i, mask_i,
-            trainer.kl_temperature, per_sample=True,
+            t_logits_i.detach(),
+            s_logits_i,
+            mask_i,
+            trainer.kl_temperature,
+            per_sample=True,
         )
         per_sample_losses.append(loss_i.squeeze(0))
 
