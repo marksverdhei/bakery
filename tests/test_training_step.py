@@ -60,6 +60,7 @@ def _make_trainer(prompts=None, responses=None, num_trajectories=1, batch_size=1
 # training_step: responses already present → delegates to super
 # ---------------------------------------------------------------------------
 
+
 def test_training_step_with_existing_responses_delegates_to_super():
     """When inputs already have responses, training_step calls super()."""
     trainer = _make_trainer()
@@ -81,6 +82,7 @@ def test_training_step_with_existing_responses_delegates_to_super():
 # training_step: no responses → generates trajectories
 # ---------------------------------------------------------------------------
 
+
 def test_training_step_generates_trajectories_when_no_responses():
     """When no responses present, training_step calls _generate_trajectories_batched."""
     trainer = _make_trainer(num_trajectories=2)
@@ -89,7 +91,9 @@ def test_training_step_generates_trajectories_when_no_responses():
     fake_results = [("Hello?", "Hi there!"), ("Hello?", "Hey!")]
 
     with (
-        patch.object(trainer, "_generate_trajectories_batched", return_value=fake_results) as mock_gen,
+        patch.object(
+            trainer, "_generate_trajectories_batched", return_value=fake_results
+        ) as mock_gen,
         patch.object(
             PromptBakingTrainer.__bases__[0],
             "training_step",
@@ -113,7 +117,11 @@ def test_training_step_populates_inputs_with_generated_responses():
         return torch.tensor(0.0)
 
     with (
-        patch.object(trainer, "_generate_trajectories_batched", return_value=[("What colour is the sky?", "Blue.")]),
+        patch.object(
+            trainer,
+            "_generate_trajectories_batched",
+            return_value=[("What colour is the sky?", "Blue.")],
+        ),
         patch.object(
             PromptBakingTrainer.__bases__[0],
             "training_step",
@@ -136,7 +144,9 @@ def test_training_step_filters_blank_trajectories():
     fake_results = [("Question?", "Valid answer.")]
 
     with (
-        patch.object(trainer, "_generate_trajectories_batched", return_value=fake_results),
+        patch.object(
+            trainer, "_generate_trajectories_batched", return_value=fake_results
+        ),
         patch.object(
             PromptBakingTrainer.__bases__[0],
             "training_step",
@@ -173,6 +183,7 @@ def test_training_step_returns_zero_when_all_trajectories_blank():
 # training_step: warning when many trajectories
 # ---------------------------------------------------------------------------
 
+
 def test_training_step_warns_when_many_trajectories(caplog):
     """Logs a warning when total trajectories exceed threshold (64)."""
     import logging
@@ -185,7 +196,9 @@ def test_training_step_warns_when_many_trajectories(caplog):
     fake_results = [(p, "ok") for p in prompts for _ in range(8)]
 
     with (
-        patch.object(trainer, "_generate_trajectories_batched", return_value=fake_results),
+        patch.object(
+            trainer, "_generate_trajectories_batched", return_value=fake_results
+        ),
         patch.object(
             PromptBakingTrainer.__bases__[0],
             "training_step",
@@ -210,7 +223,9 @@ def test_training_step_no_warn_below_threshold(caplog):
     fake_results = [(p, "ok") for p in prompts for _ in range(16)]
 
     with (
-        patch.object(trainer, "_generate_trajectories_batched", return_value=fake_results),
+        patch.object(
+            trainer, "_generate_trajectories_batched", return_value=fake_results
+        ),
         patch.object(
             PromptBakingTrainer.__bases__[0],
             "training_step",
