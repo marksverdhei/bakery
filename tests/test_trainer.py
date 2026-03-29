@@ -283,3 +283,49 @@ def test_prediction_step_sequential_eval_returns_triple():
     assert result[1] is None and result[2] is None
     loss = result[0]
     assert loss.dim() == 0
+
+
+# ---------------------------------------------------------------------------
+# _generate_trajectories_batched
+# ---------------------------------------------------------------------------
+
+def test_generate_trajectories_batched_returns_pairs():
+    """Batched generation returns (user_msg, response) pairs."""
+    trainer = _make_trainer(prompts=["Hello?"], responses=["Hi."])
+    results = trainer._generate_trajectories_batched(["Hello?"], num_trajectories=1)
+    assert isinstance(results, list)
+    assert len(results) > 0
+    for msg, resp in results:
+        assert isinstance(msg, str)
+        assert isinstance(resp, str)
+
+
+def test_generate_trajectories_batched_msg_matches_input():
+    """Each returned user_msg must be one of the original input messages."""
+    trainer = _make_trainer(prompts=["Q1", "Q2"], responses=["A1", "A2"])
+    results = trainer._generate_trajectories_batched(["Q1", "Q2"], num_trajectories=1)
+    returned_msgs = {msg for msg, _ in results}
+    assert returned_msgs.issubset({"Q1", "Q2"})
+
+
+def test_generate_trajectories_batched_num_trajectories():
+    """With num_trajectories=2 each message appears up to 2 times."""
+    trainer = _make_trainer(prompts=["Hi?"], responses=["Hello!"])
+    results = trainer._generate_trajectories_batched(["Hi?"], num_trajectories=2)
+    # At most 2 results for 1 prompt * 2 trajectories
+    assert len(results) <= 2
+
+
+def test_generate_trajectories_batched_empty_messages():
+    """Empty user_messages list returns empty results."""
+    trainer = _make_trainer(prompts=["placeholder"], responses=["placeholder"])
+    results = trainer._generate_trajectories_batched([], num_trajectories=2)
+    assert results == []
+
+
+def test_generate_trajectories_batched_filters_empty_responses():
+    """Pairs with empty responses after strip() must be excluded."""
+    trainer = _make_trainer(prompts=["placeholder"], responses=["placeholder"])
+    results = trainer._generate_trajectories_batched(["Hi"], num_trajectories=1)
+    for _, resp in results:
+        assert resp.strip() != ""
