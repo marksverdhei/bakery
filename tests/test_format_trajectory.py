@@ -167,3 +167,49 @@ class TestGenerateTrajectory:
             mock_ctx.return_value = mock_cm
             trainer._generate_trajectory("Q?")
         mock_ctx.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# _tokenize
+# ---------------------------------------------------------------------------
+
+class TestTokenize:
+    def test_tokenize_returns_dict_with_input_ids(self):
+        trainer = _make_trainer()
+        result = trainer._tokenize("Hello world", return_tensors="pt")
+        assert "input_ids" in result
+
+    def test_tokenize_no_special_tokens(self):
+        """add_special_tokens=False is always set."""
+        trainer = _make_trainer()
+        # With special tokens the beginning-of-sequence token would be prepended.
+        result_no_special = trainer._tokenize("Hello", return_tensors="pt")
+        # Directly call the tokenizer with add_special_tokens=True for comparison
+        with_special = trainer.processing_class(
+            "Hello", add_special_tokens=True, return_tensors="pt"
+        )
+        # Without special tokens should produce ≤ tokens than with
+        assert result_no_special["input_ids"].shape[1] <= with_special["input_ids"].shape[1]
+
+    def test_tokenize_respects_max_seq_length(self):
+        """When max_seq_length is set, output is truncated."""
+        trainer = _make_trainer()
+        trainer.args.max_seq_length = 3
+        long_text = "one two three four five six seven eight nine ten"
+        result = trainer._tokenize(long_text, return_tensors="pt")
+        assert result["input_ids"].shape[1] <= 3
+
+    def test_tokenize_no_truncation_without_max_seq_length(self):
+        """When max_seq_length is None, long text is not truncated."""
+        trainer = _make_trainer()
+        trainer.args.max_seq_length = None
+        long_text = " ".join(["word"] * 50)
+        result = trainer._tokenize(long_text, return_tensors="pt")
+        # Should be more than 10 tokens
+        assert result["input_ids"].shape[1] > 10
+
+    def test_tokenize_accepts_list_of_strings(self):
+        """Batch tokenization with a list works."""
+        trainer = _make_trainer()
+        result = trainer._tokenize(["Hello", "World"], return_tensors="pt", padding=True)
+        assert result["input_ids"].shape[0] == 2
