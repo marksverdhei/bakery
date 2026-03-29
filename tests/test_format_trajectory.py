@@ -260,3 +260,25 @@ class TestKLTemperature:
             data_collator=prompt_baking_collator,
         )
         assert trainer.kl_temperature == pytest.approx(2.5)
+
+
+# ---------------------------------------------------------------------------
+# generation_config
+# ---------------------------------------------------------------------------
+
+class TestGenerationConfig:
+    def test_generation_config_max_new_tokens(self):
+        trainer = _make_trainer()
+        assert trainer.generation_config.max_new_tokens == trainer.trajectory_length
+
+    def test_generation_config_temperature(self):
+        trainer = _make_trainer()
+        assert trainer.generation_config.temperature == pytest.approx(trainer.sampling_temperature)
+
+    def test_generation_config_do_sample(self):
+        trainer = _make_trainer()
+        assert trainer.generation_config.do_sample is True
+
+    def test_generation_config_pad_token_id(self):
+        trainer = _make_trainer()
+        assert trainer.generation_config.pad_token_id == trainer.processing_class.pad_token_id
