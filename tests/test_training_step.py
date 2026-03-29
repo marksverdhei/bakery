@@ -1,7 +1,7 @@
 """Tests for PromptBakingTrainer.training_step."""
 
 import torch
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig as PeftLoraConfig, get_peft_model
 
