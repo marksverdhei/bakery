@@ -289,6 +289,7 @@ def test_prediction_step_sequential_eval_returns_triple():
 # _generate_trajectories_batched
 # ---------------------------------------------------------------------------
 
+
 def test_generate_trajectories_batched_returns_pairs():
     """Batched generation returns (user_msg, response) pairs."""
     trainer = _make_trainer(prompts=["Hello?"], responses=["Hi."])

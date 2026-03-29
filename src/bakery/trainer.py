@@ -166,16 +166,12 @@ class PromptBakingTrainer(Trainer):
             for msg in user_messages
             for _ in range(num_trajectories)
         ]
-        repeated_msgs = [
-            msg
-            for msg in user_messages
-            for _ in range(num_trajectories)
-        ]
+        repeated_msgs = [msg for msg in user_messages for _ in range(num_trajectories)]
 
         with padding_side(self.processing_class, "left"):
-            inputs = self._tokenize(
-                prompts, return_tensors="pt", padding=True
-            ).to(self.model.device)
+            inputs = self._tokenize(prompts, return_tensors="pt", padding=True).to(
+                self.model.device
+            )
 
         padded_prompt_length = inputs["input_ids"].shape[1]
 
