@@ -1,5 +1,6 @@
 """Tests for PromptBakingTrainer format helpers and _generate_trajectory."""
 
+import pytest
 import torch
 from unittest.mock import patch, MagicMock
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -213,3 +214,49 @@ class TestTokenize:
         trainer = _make_trainer()
         result = trainer._tokenize(["Hello", "World"], return_tensors="pt", padding=True)
         assert result["input_ids"].shape[0] == 2
+
+
+# ---------------------------------------------------------------------------
+# kl_temperature is taken from args.temperature
+# ---------------------------------------------------------------------------
+
+class TestKLTemperature:
+    def test_kl_temperature_matches_args_temperature(self):
+        """trainer.kl_temperature equals args.temperature at construction."""
+        trainer = _make_trainer()
+        assert trainer.kl_temperature == trainer.args.temperature
+
+    def test_kl_temperature_custom_value(self):
+        """Custom temperature is reflected in kl_temperature."""
+        tokenizer = AutoTokenizer.from_pretrained("gpt2")
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.chat_template = CHAT_TEMPLATE
+
+        model = AutoModelForCausalLM.from_pretrained("gpt2")
+        peft_config = PeftLoraConfig(
+            r=4, lora_alpha=8, target_modules=["c_attn"], task_type="CAUSAL_LM"
+        )
+        model = get_peft_model(model, peft_config)
+
+        args = BakeryConfig(
+            output_dir="/tmp/bakery_test",
+            system_prompt="You are a helper.",
+            num_trajectories=1,
+            trajectory_length=16,
+            per_device_train_batch_size=1,
+            num_train_epochs=1,
+            logging_steps=1,
+            report_to="none",
+            use_cpu=True,
+            temperature=2.5,
+        )
+        from bakery.data import create_dataset, prompt_baking_collator
+        dataset = create_dataset(["Q?"])
+        trainer = PromptBakingTrainer(
+            model=model,
+            args=args,
+            train_dataset=dataset,
+            processing_class=tokenizer,
+            data_collator=prompt_baking_collator,
+        )
+        assert trainer.kl_temperature == pytest.approx(2.5)
