@@ -282,3 +282,29 @@ class TestGenerationConfig:
     def test_generation_config_pad_token_id(self):
         trainer = _make_trainer()
         assert trainer.generation_config.pad_token_id == trainer.processing_class.pad_token_id
+
+
+# ---------------------------------------------------------------------------
+# __init__ attributes
+# ---------------------------------------------------------------------------
+
+class TestInitAttributes:
+    def test_system_prompt_stored(self):
+        trainer = _make_trainer(system_prompt="Custom prompt.")
+        assert trainer.system_prompt == "Custom prompt."
+
+    def test_num_trajectories_stored(self):
+        trainer = _make_trainer(num_trajectories=3)
+        assert trainer.num_trajectories == 3
+
+    def test_trajectory_length_stored(self):
+        trainer = _make_trainer()
+        assert trainer.trajectory_length == 16  # from _make_trainer fixture
+
+    def test_sampling_temperature_stored(self):
+        trainer = _make_trainer()
+        assert trainer.sampling_temperature == trainer.args.sampling_temperature
+
+    def test_prompt_length_cache_starts_empty(self):
+        trainer = _make_trainer()
+        assert trainer._prompt_length_cache == {}
