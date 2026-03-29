@@ -177,7 +177,7 @@ class PromptBakingTrainer(Trainer):
                 prompts, return_tensors="pt", padding=True
             ).to(self.model.device)
 
-        prompt_lengths = inputs["input_ids"].shape[1]
+        padded_prompt_length = inputs["input_ids"].shape[1]
 
         was_training = self.model.training
         self.model.eval()
@@ -194,7 +194,7 @@ class PromptBakingTrainer(Trainer):
         results = []
         for i, (msg, output_ids) in enumerate(zip(repeated_msgs, outputs)):
             response = self.processing_class.decode(
-                output_ids[prompt_lengths:], skip_special_tokens=True
+                output_ids[padded_prompt_length:], skip_special_tokens=True
             ).strip()
             if response:
                 results.append((msg, response))
