@@ -1,49 +1,55 @@
-"""Prompt baking trainer via KL divergence.
+"""Context baking trainer via KL divergence.
 
-Inherits from transformers.Trainer to get standard HF training infrastructure
-(logging, checkpointing, schedulers, gradient accumulation) while implementing
-the prompt baking training loop:
+Generalizes the original prompt-baking approach to arbitrary prefix contexts —
+system prompts, conversation histories, accumulated memories, few-shot examples.
+The teacher sees the full prefix; the student sees a trimmed version (or none).
+KL divergence distills the teacher into the student, baking the prefix into weights.
 
-- Single model with PEFT adapter toggling (no duplicate weights)
-- Teacher: adapters disabled, sees system prompt
-- Student: adapters enabled, no system prompt
-- Per-token masked KL divergence loss
-- On-the-fly trajectory generation from teacher
+Inherits from transformers.Trainer for standard HF infrastructure (logging,
+checkpointing, schedulers, gradient accumulation).
 
-Based on the Prompt Baking paper (arxiv 2409.13697).
+Based on the Prompt Baking paper (arxiv 2409.13697), generalized.
 """
 
-import logging
-import torch
-from typing import Optional, Callable
+from __future__ import annotations
 
+import logging
+import warnings
+from typing import Callable, List, Optional
+
+import torch
 from datasets import Dataset
 from transformers import (
-    Trainer,
+    GenerationConfig,
     PreTrainedModel,
     PreTrainedTokenizerBase,
+    Trainer,
     TrainerCallback,
-    GenerationConfig,
 )
 from transformers.trainer_utils import EvalPrediction
 
 from bakery.kl import compute_kl_divergence, disable_adapters, padding_side
+from bakery.masking import build_target_mask
 
 logger = logging.getLogger(__name__)
 
 
-class PromptBakingTrainer(Trainer):
-    """Trainer that bakes system prompts into model weights via KL divergence.
+class ContextBakingTrainer(Trainer):
+    """Trainer that bakes an arbitrary prefix context into model weights via KL divergence.
 
-    Overrides compute_loss() and training_step() to inject prompt baking logic:
-    1. training_step: generates trajectories from teacher (adapters disabled)
-    2. compute_loss: computes per-token KL divergence between teacher and student
+    For each example:
+      - Teacher view: prefix_messages + turns (+ response)
+      - Student view: prefix_messages[-student_retained_turns:] + turns (+ response)
+    KL is computed on tokens belonging to messages whose role matches
+    `context_config.target_roles` and content matches `target_content_pattern`
+    (if set). Prefix tokens never receive loss.
     """
 
     def __init__(
         self,
         model: PreTrainedModel | str | None = None,
         args=None,
+        context_config=None,
         train_dataset: Dataset | None = None,
         eval_dataset: Dataset | None = None,
         processing_class: PreTrainedTokenizerBase | None = None,
@@ -55,11 +61,41 @@ class PromptBakingTrainer(Trainer):
             None,
         ),
     ):
-        self.system_prompt = args.system_prompt
         self.num_trajectories = args.num_trajectories
         self.trajectory_length = args.trajectory_length
         self.sampling_temperature = args.sampling_temperature
         self.kl_temperature = args.temperature
+
+        # Back-compat: if no ContextConfig is passed but args has system_prompt,
+        # auto-desugar into a minimal ContextConfig. Keeps direct-instantiation
+        # users on the old API working.
+        if context_config is None and getattr(args, "system_prompt", None):
+            from bakery.config import ContextConfig
+
+            context_config = ContextConfig(
+                prefix_messages=[
+                    {"role": "system", "content": args.system_prompt}
+                ]
+            )
+
+        # Context configuration — prefix, student view, target mask.
+        self.context_config = context_config
+        self.prefix_messages: List[dict] = (
+            list(context_config.prefix_messages)
+            if context_config and context_config.prefix_messages
+            else []
+        )
+        self.student_retained_turns: int = (
+            context_config.student_retained_turns if context_config else 0
+        )
+        self.target_roles: List[str] = (
+            list(context_config.target_roles)
+            if context_config and context_config.target_roles
+            else ["assistant"]
+        )
+        self.target_content_pattern: Optional[str] = (
+            context_config.target_content_pattern if context_config else None
+        )
 
         super().__init__(
             model=model,
@@ -73,8 +109,6 @@ class PromptBakingTrainer(Trainer):
             optimizers=optimizers,
         )
 
-        self._prompt_length_cache: dict[str, tuple[int, int]] = {}
-
         self.model_accepts_loss_kwargs = False
         self.generation_config = GenerationConfig(
             max_new_tokens=self.trajectory_length,
@@ -84,48 +118,267 @@ class PromptBakingTrainer(Trainer):
             pad_token_id=self.processing_class.pad_token_id,
         )
 
-    # -- Chat formatting --
+    # -- Tokenization --
 
-    def _tokenize(self, text: str, **kwargs) -> dict:
+    def _tokenize(self, text, **kwargs) -> dict:
         max_len = getattr(self.args, "max_seq_length", None)
         if max_len:
             kwargs.setdefault("truncation", True)
             kwargs.setdefault("max_length", max_len)
         return self.processing_class(text, add_special_tokens=False, **kwargs)
 
-    def _get_prompt_lengths(self, user_message: str) -> tuple[int, int]:
-        """Return (teacher_prompt_length, student_prompt_length) for a user message.
+    # -- Message assembly --
 
-        Results are cached because prompt lengths are deterministic for a given
-        user_message (the system_prompt is constant across the trainer's lifetime).
+    def _row_prefix(self, row_prefix: Optional[List[dict]]) -> List[dict]:
+        """Return the effective prefix for a row: per-row if set, else global."""
+        if row_prefix:
+            return list(row_prefix)
+        return list(self.prefix_messages)
+
+    def _student_prefix(self, prefix: List[dict]) -> List[dict]:
+        """Trim the prefix down to the last `student_retained_turns` messages."""
+        if self.student_retained_turns <= 0:
+            return []
+        return prefix[-self.student_retained_turns :]
+
+    @staticmethod
+    def _append_response(messages: List[dict], response: Optional[str]) -> List[dict]:
+        if response:
+            return list(messages) + [{"role": "assistant", "content": response}]
+        return list(messages)
+
+    def _build_example(
+        self,
+        row_prefix: Optional[List[dict]],
+        turns: List[dict],
+        response: Optional[str],
+    ):
+        """Build tokenized teacher + student views for a single example.
+
+        Returns a dict with:
+          teacher_ids, teacher_mask (target mask over teacher tokens),
+          student_ids, student_mask (target mask over student tokens),
+          teacher_prefix_token_len, student_prefix_token_len
+        or None if no target tokens were found.
         """
-        if user_message not in self._prompt_length_cache:
-            t_prompt = self._format_prompted(user_message)
-            t_len = self._tokenize(t_prompt, return_tensors="pt")["input_ids"].shape[1]
-            s_prompt = self._format_unprompted(user_message)
-            s_len = self._tokenize(s_prompt, return_tensors="pt")["input_ids"].shape[1]
-            self._prompt_length_cache[user_message] = (t_len, s_len)
-        return self._prompt_length_cache[user_message]
+        prefix = self._row_prefix(row_prefix)
+        student_prefix = self._student_prefix(prefix)
 
-    def _format_prompted(self, user_message: str) -> str:
-        messages = [
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": user_message},
-        ]
-        return self.processing_class.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
+        teacher_messages = self._append_response(list(prefix) + list(turns), response)
+        student_messages = self._append_response(
+            list(student_prefix) + list(turns), response
         )
 
-    def _format_unprompted(self, user_message: str) -> str:
-        messages = [{"role": "user", "content": user_message}]
-        return self.processing_class.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
+        # Target mask: prefix messages never count as targets.
+        teacher_ids, teacher_target_mask, teacher_first = build_target_mask(
+            self.processing_class,
+            teacher_messages,
+            self.target_roles,
+            self.target_content_pattern,
+            target_min_msg_idx=len(prefix),
         )
+        student_ids, student_target_mask, student_first = build_target_mask(
+            self.processing_class,
+            student_messages,
+            self.target_roles,
+            self.target_content_pattern,
+            target_min_msg_idx=len(student_prefix),
+        )
+
+        if teacher_first >= len(teacher_ids) or student_first >= len(student_ids):
+            return None  # no target tokens
+
+        return {
+            "teacher_ids": teacher_ids,
+            "teacher_mask": teacher_target_mask,
+            "teacher_first": teacher_first,
+            "student_ids": student_ids,
+            "student_mask": student_target_mask,
+            "student_first": student_first,
+        }
+
+    # -- Batch preparation --
+
+    @staticmethod
+    def _normalize_batch(inputs: dict) -> tuple[list, list, list]:
+        """Normalize batch into (prefix_messages_per_row, turns_per_row, responses).
+
+        Accepts new-format batches (prefix_messages, turns, responses) and the
+        legacy format (user_messages, responses). Legacy format wraps each user
+        message as a single-turn [{role: user, content: msg}] list.
+        """
+        if "turns" in inputs:
+            prefix_list = inputs.get("prefix_messages") or [None] * len(inputs["turns"])
+            return (
+                list(prefix_list),
+                [list(t) for t in inputs["turns"]],
+                list(inputs.get("responses", [None] * len(inputs["turns"]))),
+            )
+        # Legacy shape
+        user_messages = inputs.get("user_messages", [])
+        responses = inputs.get("responses", [None] * len(user_messages))
+        turns = [[{"role": "user", "content": m}] for m in user_messages]
+        prefix_list = [None] * len(user_messages)
+        return prefix_list, turns, list(responses)
+
+    def _build_batch(self, inputs, model) -> Optional[dict]:
+        """Tokenize + pad the batch; return dict of tensors or None if empty.
+
+        Returned dict:
+          teacher_fwd: kwargs for teacher forward (input_ids, attention_mask, ...)
+          student_fwd: kwargs for student forward
+          teacher_mask_padded: (B, T_t) bool mask of target tokens (aligned with padding)
+          student_mask_padded: (B, T_s) bool mask of target tokens
+        """
+        prefix_list, turns_list, responses = self._normalize_batch(inputs)
+        if not turns_list:
+            return None
+
+        built = []
+        for prefix, turns, resp in zip(prefix_list, turns_list, responses):
+            # Require a response or a turn ending in assistant for KL to have a target.
+            if not resp and not any(m.get("role") == "assistant" for m in turns):
+                continue
+            # If response is empty string, skip.
+            if resp is not None and isinstance(resp, str) and not resp.strip():
+                continue
+            example = self._build_example(prefix, turns, resp)
+            if example is None:
+                continue
+            built.append(example)
+
+        if not built:
+            return None
+
+        # Left-pad teacher and student id lists into tensors.
+        pad_id = self.processing_class.pad_token_id
+        if pad_id is None:
+            pad_id = self.processing_class.eos_token_id
+
+        def _pad_left(seqs, masks):
+            max_len = max(len(s) for s in seqs)
+            out_ids = torch.full((len(seqs), max_len), pad_id, dtype=torch.long)
+            out_attn = torch.zeros((len(seqs), max_len), dtype=torch.long)
+            out_mask = torch.zeros((len(seqs), max_len), dtype=torch.bool)
+            for i, (ids, msk) in enumerate(zip(seqs, masks)):
+                n = len(ids)
+                out_ids[i, max_len - n :] = torch.tensor(ids, dtype=torch.long)
+                out_attn[i, max_len - n :] = 1
+                out_mask[i, max_len - n :] = msk
+            return out_ids, out_attn, out_mask
+
+        t_ids, t_attn, t_mask = _pad_left(
+            [b["teacher_ids"] for b in built],
+            [b["teacher_mask"] for b in built],
+        )
+        s_ids, s_attn, s_mask = _pad_left(
+            [b["student_ids"] for b in built],
+            [b["student_mask"] for b in built],
+        )
+
+        device = model.device
+        t_ids = t_ids.to(device)
+        t_attn = t_attn.to(device)
+        s_ids = s_ids.to(device)
+        s_attn = s_attn.to(device)
+        # Keep masks on CPU until slicing; move to device per-sample in loss.
+
+        teacher_fwd = {"input_ids": t_ids, "attention_mask": t_attn}
+        student_fwd = {"input_ids": s_ids, "attention_mask": s_attn}
+        self._inject_gemma_token_types(model, teacher_fwd, t_ids)
+        self._inject_gemma_token_types(model, student_fwd, s_ids)
+
+        return {
+            "teacher_fwd": teacher_fwd,
+            "student_fwd": student_fwd,
+            "teacher_mask_padded": t_mask,
+            "student_mask_padded": s_mask,
+            "teacher_attn": t_attn,
+            "student_attn": s_attn,
+        }
+
+    @staticmethod
+    def _inject_gemma_token_types(model, fwd: dict, input_ids: torch.Tensor) -> None:
+        """Gemma 3/4 require token_type_ids (and mm_token_type_ids for Gemma 4)
+        during training even for text-only inputs. All-zeros is correct."""
+        mtype = getattr(model.config, "model_type", None)
+        if mtype in ("gemma3", "gemma4", "gemma4_text"):
+            fwd["token_type_ids"] = torch.zeros_like(input_ids)
+            if mtype in ("gemma4", "gemma4_text"):
+                fwd["mm_token_type_ids"] = torch.zeros_like(input_ids)
+
+    # -- KL loss from aligned logits + masks --
+
+    def _kl_from_logits(
+        self,
+        teacher_logits: torch.Tensor,
+        student_logits: torch.Tensor,
+        teacher_mask_padded: torch.BoolTensor,
+        student_mask_padded: torch.BoolTensor,
+    ) -> Optional[torch.Tensor]:
+        """Compute mean per-example KL over aligned target tokens.
+
+        Logits at position t predict token t+1, so we shift by 1. Teacher and
+        student may have different prefix lengths, so we align on the trainable
+        region by finding the first target token in each and taking the common
+        length.
+        """
+        losses = []
+        B = teacher_logits.shape[0]
+        device = student_logits.device
+
+        for i in range(B):
+            t_mask = teacher_mask_padded[i].to(device)
+            s_mask = student_mask_padded[i].to(device)
+
+            t_target_positions = t_mask.nonzero(as_tuple=False).squeeze(-1)
+            s_target_positions = s_mask.nonzero(as_tuple=False).squeeze(-1)
+            if t_target_positions.numel() == 0 or s_target_positions.numel() == 0:
+                continue
+
+            t_start = int(t_target_positions[0].item())
+            s_start = int(s_target_positions[0].item())
+
+            # Logits predict next token → shift by 1.
+            t_logits = teacher_logits[i : i + 1, t_start - 1 : -1, :]
+            s_logits = student_logits[i : i + 1, s_start - 1 : -1, :]
+            t_tail_mask = t_mask[t_start:].float().unsqueeze(0)
+            s_tail_mask = s_mask[s_start:].float().unsqueeze(0)
+
+            min_len = min(
+                t_logits.shape[1], s_logits.shape[1], t_tail_mask.shape[1], s_tail_mask.shape[1]
+            )
+            if min_len == 0:
+                continue
+
+            t_logits = t_logits[:, :min_len, :]
+            s_logits = s_logits[:, :min_len, :]
+            combined_mask = (t_tail_mask[:, :min_len] * s_tail_mask[:, :min_len])
+            if combined_mask.sum() == 0:
+                continue
+
+            loss = compute_kl_divergence(
+                t_logits.detach() if t_logits.requires_grad else t_logits,
+                s_logits,
+                combined_mask,
+                self.kl_temperature,
+            )
+            losses.append(loss)
+
+        if not losses:
+            return None
+        return torch.stack(losses).mean()
 
     # -- Trajectory generation --
 
     def _generate_trajectory(self, user_message: str) -> str:
-        prompt = self._format_prompted(user_message)
+        """Generate a response from the teacher (adapters disabled, full prefix visible)."""
+        teacher_messages = list(self.prefix_messages) + [
+            {"role": "user", "content": user_message}
+        ]
+        prompt = self.processing_class.apply_chat_template(
+            teacher_messages, tokenize=False, add_generation_prompt=True
+        )
         inputs = self._tokenize(prompt, return_tensors="pt").to(self.model.device)
 
         was_training = self.model.training
@@ -145,265 +398,99 @@ class PromptBakingTrainer(Trainer):
         )
         return response.strip()
 
-    # -- Loss computation --
+    # -- Loss + eval --
+
+    def _zero_loss(self) -> torch.Tensor:
+        return torch.tensor(0.0, device=self.args.device, requires_grad=True)
 
     def compute_loss(
         self, model, inputs, return_outputs=False, num_items_in_batch=None
     ):
         """Compute KL divergence loss with batched forward passes."""
-        user_messages = inputs.get("user_messages", [])
-        responses = inputs.get("responses", [])
-
-        if not user_messages or not responses:
-            logger.warning(
-                "Batch has no user_messages or responses — returning zero loss"
-            )
-            loss = torch.tensor(0.0, device=self.args.device, requires_grad=True)
-            return (loss, None) if return_outputs else loss
-
-        pairs = [
-            (msg, resp) for msg, resp in zip(user_messages, responses) if resp.strip()
-        ]
-        if not pairs:
-            logger.warning(
-                "All responses in batch are empty/whitespace — returning zero loss"
-            )
-            loss = torch.tensor(0.0, device=self.args.device, requires_grad=True)
-            return (loss, None) if return_outputs else loss
-
-        teacher_texts, student_texts = [], []
-        teacher_prompt_lengths, student_prompt_lengths = [], []
-
-        for user_msg, response in pairs:
-            t_msgs = [
-                {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": user_msg},
-                {"role": "assistant", "content": response},
-            ]
-            teacher_texts.append(
-                self.processing_class.apply_chat_template(t_msgs, tokenize=False)
-            )
-
-            s_msgs = [
-                {"role": "user", "content": user_msg},
-                {"role": "assistant", "content": response},
-            ]
-            student_texts.append(
-                self.processing_class.apply_chat_template(s_msgs, tokenize=False)
-            )
-
-            t_len, s_len = self._get_prompt_lengths(user_msg)
-            teacher_prompt_lengths.append(t_len)
-            student_prompt_lengths.append(s_len)
-
-        with padding_side(self.processing_class, "left"):
-            teacher_inputs = self._tokenize(
-                teacher_texts, return_tensors="pt", padding=True
-            ).to(model.device)
-            student_inputs = self._tokenize(
-                student_texts, return_tensors="pt", padding=True
-            ).to(model.device)
-
-        teacher_fwd = dict(
-            input_ids=teacher_inputs["input_ids"],
-            attention_mask=teacher_inputs["attention_mask"],
-        )
-        student_fwd = dict(
-            input_ids=student_inputs["input_ids"],
-            attention_mask=student_inputs["attention_mask"],
-        )
-        # Some architectures (e.g. Gemma 3) require token_type_ids during training.
-        # The tokenizer may not return them, so create zeros if the model expects them.
-        if hasattr(model.config, "model_type") and model.config.model_type in (
-            "gemma3",
-        ):
-            teacher_fwd["token_type_ids"] = torch.zeros_like(
-                teacher_inputs["input_ids"]
-            )
-            student_fwd["token_type_ids"] = torch.zeros_like(
-                student_inputs["input_ids"]
-            )
-        elif "token_type_ids" in teacher_inputs:
-            teacher_fwd["token_type_ids"] = teacher_inputs["token_type_ids"]
-            student_fwd["token_type_ids"] = student_inputs["token_type_ids"]
+        batch = self._build_batch(inputs, model)
+        if batch is None:
+            logger.warning("Empty batch after building — returning zero loss")
+            zero = self._zero_loss()
+            return (zero, None) if return_outputs else zero
 
         with torch.no_grad():
             with disable_adapters(model):
-                teacher_outputs = model(**teacher_fwd)
+                teacher_outputs = model(**batch["teacher_fwd"])
+        student_outputs = model(**batch["student_fwd"])
 
-        student_outputs = model(**student_fwd)
-
-        # With left-padding, each sequence has leading pad tokens that shift
-        # the real content rightward. Compute per-sequence padding offsets.
-        t_seq_len = teacher_inputs["input_ids"].shape[1]
-        s_seq_len = student_inputs["input_ids"].shape[1]
-        t_real_lengths = teacher_inputs["attention_mask"].sum(dim=1)
-        s_real_lengths = student_inputs["attention_mask"].sum(dim=1)
-
-        losses = []
-
-        for i in range(len(pairs)):
-            t_pad = t_seq_len - t_real_lengths[i].item()
-            s_pad = s_seq_len - s_real_lengths[i].item()
-            t_start = int(t_pad) + teacher_prompt_lengths[i]
-            s_start = int(s_pad) + student_prompt_lengths[i]
-
-            # Logits at position t predict token t+1, so shift back by 1 to get
-            # the logits that correspond to each response token. Slice to -1
-            # because the last position predicts a token beyond the sequence.
-            t_logits = teacher_outputs.logits[i : i + 1, t_start - 1 : -1, :]
-            s_logits = student_outputs.logits[i : i + 1, s_start - 1 : -1, :]
-
-            t_mask = teacher_inputs["attention_mask"][i : i + 1, t_start:]
-            s_mask = student_inputs["attention_mask"][i : i + 1, s_start:]
-
-            min_len = min(t_logits.shape[1], s_logits.shape[1])
-            if min_len == 0:
-                continue
-
-            t_logits = t_logits[:, :min_len, :]
-            s_logits = s_logits[:, :min_len, :]
-            mask = (t_mask[:, :min_len] * s_mask[:, :min_len]).float()
-
-            loss = compute_kl_divergence(
-                t_logits.detach(), s_logits, mask, self.kl_temperature
-            )
-            losses.append(loss)
-
-        if not losses:
+        loss = self._kl_from_logits(
+            teacher_outputs.logits,
+            student_outputs.logits,
+            batch["teacher_mask_padded"],
+            batch["student_mask_padded"],
+        )
+        if loss is None:
             logger.warning("No aligned logit pairs after slicing — returning zero loss")
-            zero = torch.tensor(0.0, device=self.args.device, requires_grad=True)
+            zero = self._zero_loss()
             return (zero, None) if return_outputs else zero
-
-        total_loss = torch.stack(losses).mean()
-        return (total_loss, None) if return_outputs else total_loss
+        return (loss, None) if return_outputs else loss
 
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
-        """Eval step: reuse compute_loss so the collated batch format works.
+        """Eval step.
 
         With sequential_eval=True, teacher logits are moved to CPU before the
         student forward pass to halve peak VRAM usage.
         """
         if not self.args.sequential_eval:
-            # Unwrap to bypass Accelerate's fp32 upcast wrapper
             raw = model.module if hasattr(model, "module") else model
             with torch.no_grad():
                 loss = self.compute_loss(raw, inputs)
             return (loss.detach(), None, None)
 
-        # Sequential eval: teacher → offload logits to CPU → student
-        user_messages = inputs.get("user_messages", [])
-        responses = inputs.get("responses", [])
-        pairs = [(m, r) for m, r in zip(user_messages, responses) if r.strip()]
-        if not pairs:
-            return (
-                torch.tensor(0.0, device=self.args.device, requires_grad=True),
-                None,
-                None,
-            )
+        # Sequential: teacher → CPU offload → student
+        batch = self._build_batch(inputs, model)
+        if batch is None:
+            return (self._zero_loss(), None, None)
 
-        teacher_texts, student_texts = [], []
-        teacher_prompt_lengths, student_prompt_lengths = [], []
-        for user_msg, response in pairs:
-            t_msgs = [
-                {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": user_msg},
-                {"role": "assistant", "content": response},
-            ]
-            s_msgs = [
-                {"role": "user", "content": user_msg},
-                {"role": "assistant", "content": response},
-            ]
-            teacher_texts.append(
-                self.processing_class.apply_chat_template(t_msgs, tokenize=False)
-            )
-            student_texts.append(
-                self.processing_class.apply_chat_template(s_msgs, tokenize=False)
-            )
-            t_len, s_len = self._get_prompt_lengths(user_msg)
-            teacher_prompt_lengths.append(t_len)
-            student_prompt_lengths.append(s_len)
-
-        with padding_side(self.processing_class, "left"):
-            teacher_inputs = self._tokenize(
-                teacher_texts, return_tensors="pt", padding=True
-            ).to(model.device)
-            student_inputs = self._tokenize(
-                student_texts, return_tensors="pt", padding=True
-            ).to(model.device)
-
-        def _make_fwd(tok_inputs):
-            fwd = dict(
-                input_ids=tok_inputs["input_ids"],
-                attention_mask=tok_inputs["attention_mask"],
-            )
-            if hasattr(model.config, "model_type") and model.config.model_type in (
-                "gemma3",
-            ):
-                fwd["token_type_ids"] = torch.zeros_like(tok_inputs["input_ids"])
-            elif "token_type_ids" in tok_inputs:
-                fwd["token_type_ids"] = tok_inputs["token_type_ids"]
-            return fwd
-
-        # Accelerate replaces model.forward with a wrapper that upcasts to fp32.
-        # Bypass by calling the CLASS forward method directly.
         base = model.module if hasattr(model, "module") else model
         fwd_fn = type(base).forward
         with torch.no_grad():
             with disable_adapters(base):
-                teacher_logits = fwd_fn(base, **_make_fwd(teacher_inputs)).logits.cpu()
+                teacher_logits = fwd_fn(base, **batch["teacher_fwd"]).logits.cpu()
             torch.cuda.empty_cache()
-            student_outputs = fwd_fn(base, **_make_fwd(student_inputs))
+            student_outputs = fwd_fn(base, **batch["student_fwd"])
 
-        t_seq_len = teacher_inputs["input_ids"].shape[1]
-        s_seq_len = student_inputs["input_ids"].shape[1]
-        t_real_lengths = teacher_inputs["attention_mask"].sum(dim=1)
-        s_real_lengths = student_inputs["attention_mask"].sum(dim=1)
-
-        losses = []
-        for i in range(len(pairs)):
-            t_pad = t_seq_len - t_real_lengths[i].item()
-            s_pad = s_seq_len - s_real_lengths[i].item()
-            t_start = int(t_pad) + teacher_prompt_lengths[i]
-            s_start = int(s_pad) + student_prompt_lengths[i]
-
-            t_logits = teacher_logits[i : i + 1, t_start - 1 : -1, :].to(model.device)
-            s_logits = student_outputs.logits[i : i + 1, s_start - 1 : -1, :]
-            t_mask = teacher_inputs["attention_mask"][i : i + 1, t_start:]
-            s_mask = student_inputs["attention_mask"][i : i + 1, s_start:]
-
-            min_len = min(t_logits.shape[1], s_logits.shape[1])
-            if min_len == 0:
-                continue
-            mask = (t_mask[:, :min_len] * s_mask[:, :min_len]).float()
-            losses.append(
-                compute_kl_divergence(
-                    t_logits[:, :min_len, :],
-                    s_logits[:, :min_len, :],
-                    mask,
-                    self.kl_temperature,
-                )
-            )
-
-        if not losses:
-            return (
-                torch.tensor(0.0, device=self.args.device, requires_grad=True),
-                None,
-                None,
-            )
-        return (torch.stack(losses).mean().detach(), None, None)
+        loss = self._kl_from_logits(
+            teacher_logits.to(student_outputs.logits.device),
+            student_outputs.logits,
+            batch["teacher_mask_padded"],
+            batch["student_mask_padded"],
+        )
+        if loss is None:
+            return (self._zero_loss(), None, None)
+        return (loss.detach(), None, None)
 
     def training_step(self, model, inputs, num_items_in_batch=None) -> torch.Tensor:
-        """Generate trajectories on-the-fly if no precomputed responses."""
-        existing_responses = inputs.get("responses", [])
-        if existing_responses:
+        """Generate trajectories on-the-fly if no precomputed responses.
+
+        Trajectory mode requires the final turn to be `user` (we sample an
+        assistant response from the teacher). Multi-turn datasets with
+        explicit assistant turns skip this path and use the provided responses.
+        """
+        existing_responses = inputs.get("responses") or []
+        if any(r for r in existing_responses):
             return super().training_step(model, inputs, num_items_in_batch)
 
-        user_messages = inputs.get("user_messages", [])
-        all_user_messages, all_responses = [], []
+        # Trajectory mode: need user_messages (legacy) or turns ending in user.
+        _, turns_list, _ = self._normalize_batch(inputs)
+        user_messages = []
+        for turns in turns_list:
+            if not turns:
+                continue
+            last = turns[-1]
+            if last.get("role") != "user":
+                logger.warning(
+                    "Trajectory mode: skipping row whose last turn is not 'user'"
+                )
+                continue
+            user_messages.append(last["content"])
 
-        # Threshold beyond which memory usage from accumulated trajectories
-        # may become significant (each trajectory requires a full forward pass).
+        all_user_messages, all_responses = [], []
         _TRAJECTORY_WARN_THRESHOLD = 64
         if len(user_messages) * self.num_trajectories > _TRAJECTORY_WARN_THRESHOLD:
             logger.warning(
@@ -413,7 +500,6 @@ class PromptBakingTrainer(Trainer):
                 len(user_messages),
                 self.num_trajectories,
             )
-
         for user_msg in user_messages:
             for _ in range(self.num_trajectories):
                 response = self._generate_trajectory(user_msg)
@@ -423,8 +509,28 @@ class PromptBakingTrainer(Trainer):
 
         if not all_responses:
             logger.warning("No valid trajectories generated — returning zero loss")
-            return torch.tensor(0.0, device=self.args.device, requires_grad=True)
+            return self._zero_loss()
 
+        # Feed back as legacy-shape batch.
         inputs["user_messages"] = all_user_messages
         inputs["responses"] = all_responses
+        inputs.pop("turns", None)
+        inputs.pop("prefix_messages", None)
         return super().training_step(model, inputs, num_items_in_batch)
+
+
+class PromptBakingTrainer(ContextBakingTrainer):
+    """Deprecated alias for ContextBakingTrainer.
+
+    Bakery now generalizes prompt baking to arbitrary prefix contexts.
+    Use ContextBakingTrainer going forward.
+    """
+
+    def __init__(self, *args, **kwargs):
+        warnings.warn(
+            "PromptBakingTrainer is deprecated; use ContextBakingTrainer instead. "
+            "The old name will be removed in a future release.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        super().__init__(*args, **kwargs)

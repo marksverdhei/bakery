@@ -23,11 +23,17 @@ class BakeryConfig(TrainingArguments):
 
     system_prompt: Optional[str] = field(
         default=None,
-        metadata={"help": "System prompt text to bake into model weights."},
+        metadata={
+            "help": "DEPRECATED — use ContextConfig.prefix_messages instead. "
+            "When set, desugars to prefix_messages=[{role: system, content: ...}]."
+        },
     )
     system_prompt_file: Optional[str] = field(
         default=None,
-        metadata={"help": "Path to file containing the system prompt."},
+        metadata={
+            "help": "DEPRECATED — use ContextConfig.prefix_messages_file instead. "
+            "Path to file containing the system prompt."
+        },
     )
     num_trajectories: int = field(
         default=4,
@@ -231,3 +237,54 @@ class LoraConfig:
 
     lora_dropout: float = field(default=0.05, metadata={"help": "LoRA dropout."})
     bias: str = field(default="none", metadata={"help": "LoRA bias mode."})
+
+
+@dataclass
+class ContextConfig:
+    """Prefix context and target-mask configuration for context baking.
+
+    Generalizes system-prompt baking to arbitrary prefix contexts (conversation
+    histories, accumulated memories, few-shot examples). The teacher sees the
+    full prefix; the student sees an optionally-trimmed version. KL is computed
+    only on tokens matching `target_roles` / `target_content_pattern`.
+    """
+
+    prefix_messages: Optional[List[dict]] = field(
+        default=None,
+        metadata={
+            "help": "Global prefix context as a list of {role, content} dicts. "
+            "Teacher sees this prepended to every example; student does not "
+            "(or sees only the last student_retained_turns of it). Overridden "
+            "per-row by a 'prefix_messages' dataset column if present."
+        },
+    )
+    prefix_messages_file: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Path to a JSON or YAML file containing the prefix_messages list. "
+            "Loaded at CLI parse time if prefix_messages is not set inline."
+        },
+    )
+    student_retained_turns: int = field(
+        default=0,
+        metadata={
+            "help": "Number of trailing prefix messages the student also sees. "
+            "0 (default) = pure baking: student sees no prefix. N>0 = student "
+            "sees the last N messages of the prefix; earlier messages are baked."
+        },
+    )
+    target_roles: List[str] = field(
+        default_factory=lambda: ["assistant"],
+        metadata={
+            "help": "Message roles whose tokens receive KL loss. Default: ['assistant']. "
+            "Any message whose role is in this list is treated as a training target."
+        },
+    )
+    target_content_pattern: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Optional regex applied to message content. When set, a message "
+            "becomes a target only if its role is in target_roles AND its content "
+            "matches this pattern (re.search semantics)."
+        },
+    )

@@ -1,7 +1,7 @@
-"""Data loading utilities for prompt baking."""
+"""Data loading utilities for context baking."""
 
 import json
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from datasets import Dataset
 
@@ -12,7 +12,7 @@ def create_dataset(
     prompts: List[str],
     responses: Optional[List[str]] = None,
 ) -> Dataset:
-    """Create a HuggingFace Dataset for prompt baking training.
+    """Create a HuggingFace Dataset for single-turn context baking training.
 
     Args:
         prompts: List of user messages.
@@ -25,10 +25,52 @@ def create_dataset(
     return Dataset.from_dict(data)
 
 
+def create_conversational_dataset(
+    rows: List[Dict[str, Any]],
+) -> Dataset:
+    """Create a HuggingFace Dataset from conversational rows.
+
+    Each row is a dict with:
+      - `turns`: List[{role, content}] — the training conversation (required).
+      - `prefix_messages`: Optional[List[{role, content}]] — per-row prefix
+        that overrides the global ContextConfig.prefix_messages.
+      - `response`: Optional[str] — for trajectory mode or single-turn data;
+        when set, the trainer appends {role: assistant, content: response}
+        to `turns`.
+    """
+    data = {
+        "turns": [r.get("turns", []) for r in rows],
+        "prefix_messages": [r.get("prefix_messages") for r in rows],
+        "responses": [r.get("response") for r in rows],
+    }
+    return Dataset.from_dict(data)
+
+
 def prompt_baking_collator(features: List[dict]) -> dict:
-    """Collate function that passes user_messages and responses through."""
-    user_messages, responses = [], []
+    """Collate function for context baking.
+
+    Accepts both shapes and emits a batch with whichever keys are present:
+
+    - Legacy: {user_messages, responses}
+    - Conversational: {prefix_messages, turns, responses}
+
+    Legacy items are passed through unchanged so the trainer can normalize
+    them to the conversational shape.
+    """
+    user_messages: List[str] = []
+    responses: List[Optional[str]] = []
+    turns: List[List[dict]] = []
+    prefix_messages: List[Optional[List[dict]]] = []
+    saw_turns = False
+
     for f in features:
+        if "turns" in f:
+            saw_turns = True
+            turns.append(list(f["turns"]) if f["turns"] is not None else [])
+            prefix_messages.append(f.get("prefix_messages"))
+            responses.append(f.get("responses"))
+            continue
+
         msg = f.get("user_messages")
         if isinstance(msg, list):
             user_messages.extend(msg)
@@ -40,6 +82,13 @@ def prompt_baking_collator(features: List[dict]) -> dict:
             responses.extend(resp)
         elif isinstance(resp, str):
             responses.append(resp)
+
+    if saw_turns:
+        return {
+            "turns": turns,
+            "prefix_messages": prefix_messages,
+            "responses": responses,
+        }
     return {"user_messages": user_messages, "responses": responses}
 
 
@@ -241,6 +290,133 @@ def _load_hf(
         return prompts, responses
 
     return prompts, None
+
+
+def load_conversations(
+    source: str, split: str = "train"
+) -> List[Dict[str, Any]]:
+    """Load conversational training rows from a local JSON file or HF dataset.
+
+    Returns a list of dicts suitable for `create_conversational_dataset`:
+      - `turns`: List[{role, content}]
+      - `prefix_messages`: Optional[List[{role, content}]]
+      - `response`: Optional[str]
+
+    HF `messages` columns are preserved as full turn sequences (NOT flattened),
+    so multi-turn conversations can be baked with all assistant turns as KL targets.
+    """
+    import os
+
+    if os.path.exists(source):
+        return _load_conversations_json(source)
+    return _load_conversations_hf(source, split)
+
+
+def _load_conversations_json(path: str) -> List[Dict[str, Any]]:
+    with open(path) as f:
+        data = json.load(f)
+
+    if isinstance(data, dict):
+        for key in (
+            "pairs",
+            "data",
+            "samples",
+            "completions",
+            "training_samples",
+            "conversations",
+        ):
+            if key in data:
+                data = data[key]
+                break
+
+    if isinstance(data, list) and data and isinstance(data[0], str):
+        return [
+            {"turns": [{"role": "user", "content": p}], "prefix_messages": None, "response": None}
+            for p in data
+        ]
+
+    rows: List[Dict[str, Any]] = []
+    for item in data:
+        prefix = item.get("prefix_messages")
+        if "messages" in item and isinstance(item["messages"], list):
+            turns = item["messages"]
+            response = None
+        else:
+            p = item.get(
+                "prompt",
+                item.get("user_message", item.get("input", item.get("question", ""))),
+            )
+            if not p:
+                continue
+            turns = [{"role": "user", "content": p}]
+            response = item.get("response", item.get("completion", item.get("output")))
+        rows.append(
+            {
+                "turns": list(turns),
+                "prefix_messages": list(prefix) if prefix else None,
+                "response": response,
+            }
+        )
+    return rows
+
+
+def _load_conversations_hf(
+    dataset_id: str, split: str = "train"
+) -> List[Dict[str, Any]]:
+    from datasets import load_dataset as hf_load_dataset
+
+    ds = hf_load_dataset(dataset_id, split=split)
+    columns = ds.column_names
+    has_prefix = "prefix_messages" in columns
+
+    if "messages" in columns:
+        rows: List[Dict[str, Any]] = []
+        for row in ds:
+            msgs = row["messages"]
+            if not msgs:
+                continue
+            rows.append(
+                {
+                    "turns": list(msgs),
+                    "prefix_messages": list(row["prefix_messages"])
+                    if has_prefix and row.get("prefix_messages")
+                    else None,
+                    "response": None,
+                }
+            )
+        return rows
+
+    prompt_col = None
+    for col in ("prompt", "input", "question", "text", "instruction"):
+        if col in columns:
+            prompt_col = col
+            break
+    if prompt_col is None:
+        raise ValueError(
+            f"Cannot find prompt column in dataset '{dataset_id}'. "
+            f"Available columns: {columns}"
+        )
+
+    response_col = None
+    for col in ("response", "completion", "output", "answer", "target"):
+        if col in columns:
+            response_col = col
+            break
+
+    rows = []
+    for row in ds:
+        if not row.get(prompt_col):
+            continue
+        rows.append(
+            {
+                "turns": [{"role": "user", "content": row[prompt_col]}],
+                "prefix_messages": list(row["prefix_messages"])
+                if has_prefix and row.get("prefix_messages")
+                else None,
+                "response": row[response_col] if response_col else None,
+            }
+        )
+    return rows
 
 
 def load_eval_data(eval_file: Optional[str]) -> List[Tuple[str, List[str]]]:

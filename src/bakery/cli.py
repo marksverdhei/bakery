@@ -8,6 +8,7 @@ Usage:
 import argparse
 import os
 import json
+import warnings
 import torch
 
 from transformers import (
@@ -18,11 +19,13 @@ from transformers import (
 )
 from peft import LoraConfig as PeftLoraConfig, get_peft_model
 
-from bakery.config import BakeryConfig, DataConfig, LoraConfig
-from bakery.trainer import PromptBakingTrainer
+from bakery.config import BakeryConfig, ContextConfig, DataConfig, LoraConfig
+from bakery.trainer import ContextBakingTrainer
 from bakery.data import (
+    create_conversational_dataset,
     create_dataset,
     prompt_baking_collator,
+    load_conversations,
     load_corpus,
     build_system_prompt,
     load_data,
@@ -35,6 +38,24 @@ DTYPE_MAP = {
     "float16": torch.float16,
     "bfloat16": torch.bfloat16,
 }
+
+
+def _load_prefix_file(path: str) -> list:
+    """Load prefix_messages from a JSON or YAML file (expects a list of {role, content})."""
+    with open(path) as f:
+        text = f.read()
+    if path.endswith((".yaml", ".yml")):
+        import yaml
+
+        data = yaml.safe_load(text)
+    else:
+        data = json.loads(text)
+    if not isinstance(data, list):
+        raise ValueError(
+            f"prefix_messages_file {path!r} must contain a JSON/YAML list of "
+            "{role, content} dicts."
+        )
+    return data
 
 
 def main():
@@ -57,9 +78,9 @@ def main():
     pre_args, remaining_args = pre_parser.parse_known_args()
     config_file = pre_args.config
 
-    parser = HfArgumentParser((BakeryConfig, DataConfig, LoraConfig))
+    parser = HfArgumentParser((BakeryConfig, DataConfig, LoraConfig, ContextConfig))
 
-    baking_config, data_config, lora_config = parser.parse_yaml_file(
+    baking_config, data_config, lora_config, context_config = parser.parse_yaml_file(
         config_file, allow_extra_keys=True
     )
     # Apply CLI overrides on top of YAML config.
@@ -73,38 +94,96 @@ def main():
             if arg.startswith("--"):
                 explicit_keys.add(arg.lstrip("-").replace("-", "_"))
 
-        override_parser = HfArgumentParser((BakeryConfig, DataConfig, LoraConfig))
+        override_parser = HfArgumentParser(
+            (BakeryConfig, DataConfig, LoraConfig, ContextConfig)
+        )
         overrides = override_parser.parse_args_into_dataclasses(
             args=["--output_dir", baking_config.output_dir] + remaining_args,
             return_remaining_strings=True,
         )
         for override_cfg, base_cfg in zip(
-            overrides[:3],
-            (baking_config, data_config, lora_config),
+            overrides[:4],
+            (baking_config, data_config, lora_config, context_config),
         ):
             for k, v in vars(override_cfg).items():
                 if k in explicit_keys:
                     setattr(base_cfg, k, v)
 
-    # Build system prompt
-    corpus = load_corpus(data_config)
-    system_prompt = build_system_prompt(baking_config, data_config, corpus)
-    baking_config.system_prompt = system_prompt
+    # Load prefix_messages_file if set (JSON or YAML list of {role, content} dicts).
+    if context_config.prefix_messages is None and context_config.prefix_messages_file:
+        context_config.prefix_messages = _load_prefix_file(
+            context_config.prefix_messages_file
+        )
 
-    # Load data
-    training_prompts, precomputed_responses = load_data(data_config)
+    # Build system prompt (supports corpus-based knowledge baking) — retained
+    # for backward compat; desugars into prefix_messages below.
+    corpus = load_corpus(data_config)
+    try:
+        system_prompt = build_system_prompt(baking_config, data_config, corpus)
+    except ValueError:
+        # No system_prompt configured — OK if prefix_messages is set.
+        system_prompt = None
+    if system_prompt:
+        baking_config.system_prompt = system_prompt
+
+    # Desugar deprecated system_prompt → prefix_messages when user didn't set prefix.
+    if not context_config.prefix_messages and baking_config.system_prompt:
+        if baking_config.system_prompt_file or corpus:
+            pass  # typical (non-deprecated) path: corpus-driven or file-loaded prompt
+        else:
+            warnings.warn(
+                "`system_prompt` is deprecated; use ContextConfig.prefix_messages instead. "
+                "Auto-wrapping into prefix_messages=[{role: system, content: ...}].",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        context_config.prefix_messages = [
+            {"role": "system", "content": baking_config.system_prompt}
+        ]
+
+    if not context_config.prefix_messages:
+        raise ValueError(
+            "No prefix context configured. Set prefix_messages (inline or via "
+            "prefix_messages_file), or the deprecated system_prompt / corpus_file."
+        )
+
+    # Load data. Use conversational loader when the source preserves multi-turn
+    # history (HF `messages` column or JSON rows with `messages`/`prefix_messages`);
+    # otherwise use the simple (prompts, responses) path.
+    conversational_rows = None
+    training_prompts, precomputed_responses = [], None
+    if data_config.dataset or data_config.training_prompts:
+        if data_config.dataset:
+            try:
+                conversational_rows = load_conversations(
+                    data_config.dataset, data_config.dataset_split
+                )
+            except Exception:
+                conversational_rows = None
+        if conversational_rows is None:
+            training_prompts, precomputed_responses = load_data(data_config)
     eval_qa = load_eval_data(data_config.eval_file)
     heldout_qa = load_eval_data(data_config.heldout_file)
 
     print("=" * 70)
-    print("Bakery - Prompt Baking with KL Divergence")
+    print("Bakery - Context Baking with KL Divergence")
     print("=" * 70)
-    print(f"  System prompt: {len(system_prompt):,} chars")
-    print(f"  Training prompts: {len(training_prompts)}")
-    if precomputed_responses:
-        print(f"  Precomputed responses: {len(precomputed_responses)}")
+    print(
+        f"  Prefix messages: {len(context_config.prefix_messages)} "
+        f"({sum(len(m.get('content', '')) for m in context_config.prefix_messages):,} chars)"
+    )
+    if conversational_rows is not None:
+        n_turns = sum(len(r.get("turns", [])) for r in conversational_rows)
+        print(
+            f"  Training rows (conversational): {len(conversational_rows)} "
+            f"({n_turns} total turns)"
+        )
     else:
-        print("  Mode: on-the-fly trajectory generation")
+        print(f"  Training prompts: {len(training_prompts)}")
+        if precomputed_responses:
+            print(f"  Precomputed responses: {len(precomputed_responses)}")
+        else:
+            print("  Mode: on-the-fly trajectory generation")
     if eval_qa:
         print(f"  Evaluation Q&A: {len(eval_qa)}")
     if heldout_qa:
@@ -126,6 +205,37 @@ def main():
         if data_config.use_unsloth:
             features.append("unsloth")
         ensure_deps(model_type=model_type, features=features)
+
+    # Gemma 4 introduces Gemma4ClippableLinear (inherits nn.Module, not nn.Linear)
+    # in its vision/audio encoders.  PEFT rejects it even when targeting only text
+    # layers.  Monkey-patch it to inherit nn.Linear so PEFT's type check passes.
+    # Must happen before from_pretrained() materialises the model.
+    try:
+        from transformers.models.gemma4 import modeling_gemma4
+        import torch.nn as nn
+
+        class _PatchedClippableLinear(nn.Linear):
+            def __init__(self, config, in_features, out_features):
+                nn.Linear.__init__(self, in_features, out_features, bias=False)
+                self.use_clipped_linears = getattr(config, "use_clipped_linears", False)
+                if self.use_clipped_linears:
+                    self.register_buffer("input_min", torch.tensor(-float("inf")))
+                    self.register_buffer("input_max", torch.tensor(float("inf")))
+                    self.register_buffer("output_min", torch.tensor(-float("inf")))
+                    self.register_buffer("output_max", torch.tensor(float("inf")))
+
+            def forward(self, x):
+                if self.use_clipped_linears:
+                    x = torch.clamp(x, self.input_min, self.input_max)
+                out = nn.Linear.forward(self, x)
+                if self.use_clipped_linears:
+                    out = torch.clamp(out, self.output_min, self.output_max)
+                return out
+
+        modeling_gemma4.Gemma4ClippableLinear = _PatchedClippableLinear
+        print("  Patched Gemma4ClippableLinear for PEFT compatibility")
+    except (ImportError, AttributeError):
+        pass  # Not a Gemma 4 run or transformers too old
 
     # Load model
     print(f"\n[1] Loading model: {data_config.model_name_or_path}")
@@ -209,32 +319,45 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    prompt_tokens = len(tokenizer.encode(system_prompt))
-    print(f"  System prompt tokens: {prompt_tokens:,}")
+    # Rough prefix-token count (for summary output only).
+    prefix_rendered = tokenizer.apply_chat_template(
+        context_config.prefix_messages, tokenize=False, add_generation_prompt=False
+    )
+    prompt_tokens = len(tokenizer.encode(prefix_rendered, add_special_tokens=False))
+    print(f"  Prefix tokens: {prompt_tokens:,}")
 
-    # Baseline evaluations
+    # Baseline evaluations (only when prefix is a single system message; otherwise
+    # "discrete prompt" baseline comparison isn't well-defined).
+    _is_simple_system_prompt = (
+        len(context_config.prefix_messages) == 1
+        and context_config.prefix_messages[0].get("role") == "system"
+    )
+    discrete_sp = (
+        context_config.prefix_messages[0]["content"] if _is_simple_system_prompt else None
+    )
     if eval_qa:
         print("\n[2] Baseline evaluations...")
-        print("\n  === No system prompt ===")
+        print("\n  === No prefix ===")
         baseline_none = evaluate_model(base_model, tokenizer, eval_qa, "Baseline")
-        print("\n  === With system prompt (discrete) ===")
-        baseline_discrete = evaluate_model(
-            base_model,
-            tokenizer,
-            eval_qa,
-            "Discrete prompt",
-            system_prompt=system_prompt,
-        )
-        heldout_discrete = None
-        if heldout_qa:
-            print("\n  === Held-out (discrete prompt) ===")
-            heldout_discrete = evaluate_model(
+        baseline_discrete = heldout_discrete = None
+        if discrete_sp:
+            print("\n  === With system prompt (discrete) ===")
+            baseline_discrete = evaluate_model(
                 base_model,
                 tokenizer,
-                heldout_qa,
-                "Discrete (held-out)",
-                system_prompt=system_prompt,
+                eval_qa,
+                "Discrete prompt",
+                system_prompt=discrete_sp,
             )
+            if heldout_qa:
+                print("\n  === Held-out (discrete prompt) ===")
+                heldout_discrete = evaluate_model(
+                    base_model,
+                    tokenizer,
+                    heldout_qa,
+                    "Discrete (held-out)",
+                    system_prompt=discrete_sp,
+                )
     else:
         baseline_none = baseline_discrete = heldout_discrete = None
 
@@ -272,37 +395,47 @@ def main():
 
     # Create dataset
     print("\n[4] Training with KL divergence...")
-    if precomputed_responses:
-        print(
-            f"  Using {len(precomputed_responses)} precomputed (prompt, response) pairs"
-        )
+    if conversational_rows is not None:
+        train_dataset = create_conversational_dataset(conversational_rows)
+        print(f"  Using {len(train_dataset)} conversational rows")
     else:
-        print(
-            f"  Generating {baking_config.num_trajectories} trajectories per prompt on-the-fly"
-        )
-
-    train_dataset = create_dataset(training_prompts, precomputed_responses)
+        if precomputed_responses:
+            print(
+                f"  Using {len(precomputed_responses)} precomputed (prompt, response) pairs"
+            )
+        else:
+            print(
+                f"  Generating {baking_config.num_trajectories} trajectories per prompt on-the-fly"
+            )
+        train_dataset = create_dataset(training_prompts, precomputed_responses)
 
     eval_dataset = None
     if data_config.eval_dataset_split and data_config.dataset:
         print(f"  Loading eval split: {data_config.eval_dataset_split}")
-        eval_prompts, eval_responses = load_data(
-            type(
-                "_DC",
-                (),
-                {
-                    "dataset": data_config.dataset,
-                    "dataset_split": data_config.eval_dataset_split,
-                    "training_prompts": None,
-                },
-            )()
-        )
-        eval_dataset = create_dataset(eval_prompts, eval_responses)
+        try:
+            eval_rows = load_conversations(
+                data_config.dataset, data_config.eval_dataset_split
+            )
+            eval_dataset = create_conversational_dataset(eval_rows)
+        except Exception:
+            eval_prompts, eval_responses = load_data(
+                type(
+                    "_DC",
+                    (),
+                    {
+                        "dataset": data_config.dataset,
+                        "dataset_split": data_config.eval_dataset_split,
+                        "training_prompts": None,
+                    },
+                )()
+            )
+            eval_dataset = create_dataset(eval_prompts, eval_responses)
         print(f"  Eval samples: {len(eval_dataset)}")
 
-    trainer = PromptBakingTrainer(
+    trainer = ContextBakingTrainer(
         model=model,
         args=baking_config,
+        context_config=context_config,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         processing_class=tokenizer,
@@ -349,7 +482,7 @@ def main():
     print("\n" + "=" * 70)
     print("SUMMARY")
     print("=" * 70)
-    print(f"System prompt: {prompt_tokens:,} tokens -> 0 tokens at inference")
+    print(f"Prefix context: {prompt_tokens:,} tokens -> 0 tokens at inference")
 
     if eval_qa and baseline_discrete and baked_eval:
         print("\nEvaluation set:")

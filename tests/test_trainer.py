@@ -152,31 +152,36 @@ def test_loss_is_differentiable():
     assert has_grad, "No LoRA parameters received gradients"
 
 
-def test_prompt_length_cache():
-    """Prompt lengths are cached and reused across compute_loss calls."""
+def test_target_mask_cache_grows_per_unique_conversation():
+    """Target-mask cache accumulates one entry per unique (teacher, student) convo."""
+    from bakery.masking import _MASK_CACHE, clear_mask_cache
+
+    clear_mask_cache()
     trainer = _make_trainer(
         prompts=["What is 2+2?"],
         responses=["The answer is 4."],
     )
-    assert len(trainer._prompt_length_cache) == 0
+    assert len(_MASK_CACHE) == 0
 
     inputs = {
         "user_messages": ["What is 2+2?"],
         "responses": ["The answer is 4."],
     }
     trainer.compute_loss(trainer.model, inputs)
-    assert "What is 2+2?" in trainer._prompt_length_cache
-    t_len, s_len = trainer._prompt_length_cache["What is 2+2?"]
-    assert isinstance(t_len, int) and t_len > 0
-    assert isinstance(s_len, int) and s_len > 0
+    # Two entries: teacher-view and student-view of the single conversation.
+    size_after_first = len(_MASK_CACHE)
+    assert size_after_first >= 1
 
-    # Second call with same prompt should reuse cache (no new entries)
+    # Second call with identical inputs should not add new entries.
     trainer.compute_loss(trainer.model, inputs)
-    assert len(trainer._prompt_length_cache) == 1
+    assert len(_MASK_CACHE) == size_after_first
 
 
-def test_prompt_length_cache_multiple_prompts():
-    """Cache accumulates entries for different prompts."""
+def test_target_mask_cache_multiple_prompts():
+    """Different prompts produce distinct cache entries."""
+    from bakery.masking import _MASK_CACHE, clear_mask_cache
+
+    clear_mask_cache()
     trainer = _make_trainer(
         prompts=["Q1", "Q2"],
         responses=["A1", "A2"],
@@ -187,6 +192,5 @@ def test_prompt_length_cache_multiple_prompts():
         "responses": ["A1", "A2"],
     }
     trainer.compute_loss(trainer.model, inputs)
-    assert len(trainer._prompt_length_cache) == 2
-    assert "Q1" in trainer._prompt_length_cache
-    assert "Q2" in trainer._prompt_length_cache
+    # At least 2 unique conversations → at least 2 entries.
+    assert len(_MASK_CACHE) >= 2

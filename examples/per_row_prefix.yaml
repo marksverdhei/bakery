@@ -1,0 +1,63 @@
+# Per-row prefix baking (e.g. many personas, one model).
+#
+# Each training row carries its own `prefix_messages` column that
+# overrides the global one. This is useful for baking a family of
+# personas/contexts into a single adapter — each example conditions the
+# teacher on a different prefix and the student learns them all.
+#
+# Data format (JSON):
+#   [
+#     {
+#       "prefix_messages": [{"role": "system", "content": "Persona A ..."}],
+#       "messages": [
+#         {"role": "user", "content": "..."},
+#         {"role": "assistant", "content": "..."}
+#       ]
+#     },
+#     ...
+#   ]
+#
+# Usage:
+#   bakery --config examples/per_row_prefix.yaml
+
+# --- Standard TrainingArguments ---
+output_dir: "./outputs/per_row_prefix"
+num_train_epochs: 2
+learning_rate: 1e-4
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 4
+logging_steps: 5
+save_strategy: "epoch"
+bf16: true
+report_to: "none"
+seed: 42
+
+# --- Context baking ---
+# Fallback prefix used if a row has no `prefix_messages`. Individual rows
+# override this via their own `prefix_messages` field.
+prefix_messages:
+  - role: system
+    content: "You are a helpful assistant."
+
+student_retained_turns: 0
+target_roles:
+  - assistant
+
+# --- Model ---
+model_name_or_path: "Qwen/Qwen3-0.6B"
+torch_dtype: "bfloat16"
+attn_implementation: "sdpa"
+
+# --- LoRA ---
+r: 32
+lora_alpha: 64
+target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+lora_dropout: 0.05
+
+# --- Data ---
+# Local JSON file with per-row prefix_messages + messages.
+dataset: "./data/personas.json"
