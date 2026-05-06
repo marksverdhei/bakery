@@ -1,7 +1,5 @@
 # bakery
 
-*Where LLMs go to get baked.*
-
 Prompt baking distills a system prompt into model weights via KL divergence training with LoRA, so you get the behavior of a prompted model at zero inference-time prompt cost.
 
 Based on [Prompt Baking](https://arxiv.org/abs/2409.13697).
