@@ -2,9 +2,9 @@ name: pytest
 
 on:
   push:
-    branches: "main"
+    branches: [main]
   pull_request:
-    branches: "*"
+  workflow_dispatch:
 
 
 jobs:
@@ -15,4 +15,4 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv python install
       - run: uv sync
-      - run: uv run pytest -vv
+      - run: uv run pytest -vv -m "not gpu and not benchmark"
