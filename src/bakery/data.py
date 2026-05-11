@@ -292,9 +292,7 @@ def _load_hf(
     return prompts, None
 
 
-def load_conversations(
-    source: str, split: str = "train"
-) -> List[Dict[str, Any]]:
+def load_conversations(source: str, split: str = "train") -> List[Dict[str, Any]]:
     """Load conversational training rows from a local JSON file or HF dataset.
 
     Returns a list of dicts suitable for `create_conversational_dataset`:
@@ -331,7 +329,11 @@ def _load_conversations_json(path: str) -> List[Dict[str, Any]]:
 
     if isinstance(data, list) and data and isinstance(data[0], str):
         return [
-            {"turns": [{"role": "user", "content": p}], "prefix_messages": None, "response": None}
+            {
+                "turns": [{"role": "user", "content": p}],
+                "prefix_messages": None,
+                "response": None,
+            }
             for p in data
         ]
 

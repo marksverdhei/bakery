@@ -33,7 +33,9 @@ def _tokenize_prefix(tokenizer, messages: List[dict]) -> List[int]:
         tokenize=False,
         add_generation_prompt=False,
     )
-    ids = tokenizer(rendered, add_special_tokens=False, return_tensors=None)["input_ids"]
+    ids = tokenizer(rendered, add_special_tokens=False, return_tensors=None)[
+        "input_ids"
+    ]
     # Some tokenizers return List[List[int]] when given a single string; flatten.
     if ids and isinstance(ids[0], list):
         ids = ids[0]

@@ -333,7 +333,9 @@ def main():
         and context_config.prefix_messages[0].get("role") == "system"
     )
     discrete_sp = (
-        context_config.prefix_messages[0]["content"] if _is_simple_system_prompt else None
+        context_config.prefix_messages[0]["content"]
+        if _is_simple_system_prompt
+        else None
     )
     if eval_qa:
         print("\n[2] Baseline evaluations...")

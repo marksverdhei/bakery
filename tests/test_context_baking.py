@@ -2,10 +2,6 @@
 multi-turn, per-row prefix override, retained student turns).
 """
 
-import re
-
-import pytest
-import torch
 from peft import LoraConfig as PeftLoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -117,9 +113,7 @@ def test_mask_regex_filter():
         {"role": "assistant", "content": "Answer: yes"},
     ]
     _, mask_all, _ = build_target_mask(tok, messages, ["assistant"], None)
-    _, mask_filtered, _ = build_target_mask(
-        tok, messages, ["assistant"], r"^Answer:"
-    )
+    _, mask_filtered, _ = build_target_mask(tok, messages, ["assistant"], r"^Answer:")
     assert mask_all.sum() > mask_filtered.sum()
     assert mask_filtered.sum() > 0
 
@@ -311,7 +305,10 @@ def test_create_conversational_dataset_shape():
     """create_conversational_dataset preserves prefix_messages/turns/response columns."""
     rows = [
         {
-            "turns": [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}],
+            "turns": [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "a"},
+            ],
             "prefix_messages": [{"role": "system", "content": "s"}],
             "response": None,
         },

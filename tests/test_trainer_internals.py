@@ -6,7 +6,6 @@ Uses one shared tiny GPT-2 + LoRA trainer across many tests to keep CPU time dow
 import warnings
 
 import pytest
-import torch
 from peft import LoraConfig as PeftLoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -149,9 +148,7 @@ def test_student_prefix_keeps_last_n():
 
 
 def test_append_response_with_string():
-    out = ContextBakingTrainer._append_response(
-        [{"role": "user", "content": "q"}], "a"
-    )
+    out = ContextBakingTrainer._append_response([{"role": "user", "content": "q"}], "a")
     assert out[-1] == {"role": "assistant", "content": "a"}
     assert len(out) == 2
 
@@ -317,8 +314,7 @@ def test_compute_loss_is_differentiable(trainer_sys):
     loss.backward()
     # At least one LoRA param got a gradient.
     has_grad = any(
-        p.grad is not None and p.requires_grad
-        for p in trainer_sys.model.parameters()
+        p.grad is not None and p.requires_grad for p in trainer_sys.model.parameters()
     )
     assert has_grad
 
@@ -398,9 +394,7 @@ def test_compute_loss_with_student_retained_turns_nonzero():
             student_retained_turns=2,
         )
     )
-    loss = t.compute_loss(
-        t.model, {"user_messages": ["hi"], "responses": ["there"]}
-    )
+    loss = t.compute_loss(t.model, {"user_messages": ["hi"], "responses": ["there"]})
     # With retained turns student already sees ctx — loss is smaller but non-negative.
     assert loss.item() >= 0
 
@@ -463,9 +457,7 @@ def test_back_compat_system_prompt_auto_desugars_in_trainer_init():
         processing_class=tokenizer,
         data_collator=prompt_baking_collator,
     )
-    assert t.prefix_messages == [
-        {"role": "system", "content": "Auto desugared!"}
-    ]
+    assert t.prefix_messages == [{"role": "system", "content": "Auto desugared!"}]
 
 
 # ---------- prediction_step ----------

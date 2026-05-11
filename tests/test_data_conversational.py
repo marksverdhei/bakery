@@ -60,7 +60,10 @@ def test_create_conversational_dataset_preserves_row_order():
 
 def test_create_conversational_dataset_mixed_prefix_presence():
     rows = [
-        {"turns": [{"role": "user", "content": "a"}], "prefix_messages": [{"role": "system", "content": "P"}]},
+        {
+            "turns": [{"role": "user", "content": "a"}],
+            "prefix_messages": [{"role": "system", "content": "P"}],
+        },
         {"turns": [{"role": "user", "content": "b"}]},
     ]
     ds = create_conversational_dataset(rows)

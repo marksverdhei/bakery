@@ -28,7 +28,7 @@ from transformers import (
 )
 from transformers.trainer_utils import EvalPrediction
 
-from bakery.kl import compute_kl_divergence, disable_adapters, padding_side
+from bakery.kl import compute_kl_divergence, disable_adapters
 from bakery.masking import build_target_mask
 
 logger = logging.getLogger(__name__)
@@ -73,9 +73,7 @@ class ContextBakingTrainer(Trainer):
             from bakery.config import ContextConfig
 
             context_config = ContextConfig(
-                prefix_messages=[
-                    {"role": "system", "content": args.system_prompt}
-                ]
+                prefix_messages=[{"role": "system", "content": args.system_prompt}]
             )
 
         # Context configuration — prefix, student view, target mask.
@@ -346,14 +344,17 @@ class ContextBakingTrainer(Trainer):
             s_tail_mask = s_mask[s_start:].float().unsqueeze(0)
 
             min_len = min(
-                t_logits.shape[1], s_logits.shape[1], t_tail_mask.shape[1], s_tail_mask.shape[1]
+                t_logits.shape[1],
+                s_logits.shape[1],
+                t_tail_mask.shape[1],
+                s_tail_mask.shape[1],
             )
             if min_len == 0:
                 continue
 
             t_logits = t_logits[:, :min_len, :]
             s_logits = s_logits[:, :min_len, :]
-            combined_mask = (t_tail_mask[:, :min_len] * s_tail_mask[:, :min_len])
+            combined_mask = t_tail_mask[:, :min_len] * s_tail_mask[:, :min_len]
             if combined_mask.sum() == 0:
                 continue
 
