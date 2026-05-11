@@ -28,8 +28,9 @@ from transformers import (
 )
 from transformers.trainer_utils import EvalPrediction
 
-from bakery.kl import compute_kl_divergence, disable_adapters
+from bakery.kl import compute_kl_divergence, disable_adapters, topk_forward_kl
 from bakery.masking import build_target_mask
+from bakery.teachers.base import TeacherBackend
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,8 @@ class ContextBakingTrainer(Trainer):
         model: PreTrainedModel | str | None = None,
         args=None,
         context_config=None,
+        teacher_backend: Optional[TeacherBackend] = None,
+        teacher_top_k: int = 64,
         train_dataset: Dataset | None = None,
         eval_dataset: Dataset | None = None,
         processing_class: PreTrainedTokenizerBase | None = None,
@@ -65,6 +68,8 @@ class ContextBakingTrainer(Trainer):
         self.trajectory_length = args.trajectory_length
         self.sampling_temperature = args.sampling_temperature
         self.kl_temperature = args.temperature
+        self.teacher_backend = teacher_backend
+        self.teacher_top_k = teacher_top_k
 
         # Back-compat: if no ContextConfig is passed but args has system_prompt,
         # auto-desugar into a minimal ContextConfig. Keeps direct-instantiation
@@ -307,6 +312,57 @@ class ContextBakingTrainer(Trainer):
 
     # -- KL loss from aligned logits + masks --
 
+    def _align_and_slice(
+        self,
+        i: int,
+        teacher_data: torch.Tensor,
+        student_logits: torch.Tensor,
+        teacher_mask_padded: torch.BoolTensor,
+        student_mask_padded: torch.BoolTensor,
+    ):
+        """Find the aligned target region for sample i and return slices.
+
+        Returns (t_slice, s_logits_slice, combined_mask) or None if no overlap.
+        `teacher_data` is the teacher tensor we want to align — full logits in
+        local-toggle mode, top-k indices/values in external-teacher mode
+        (slicing dim is the same: position).
+        """
+        device = student_logits.device
+        t_mask = teacher_mask_padded[i].to(device)
+        s_mask = student_mask_padded[i].to(device)
+
+        t_pos = t_mask.nonzero(as_tuple=False).squeeze(-1)
+        s_pos = s_mask.nonzero(as_tuple=False).squeeze(-1)
+        if t_pos.numel() == 0 or s_pos.numel() == 0:
+            return None
+
+        t_start = int(t_pos[0].item())
+        s_start = int(s_pos[0].item())
+
+        # Logits predict next token → shift by 1.
+        t_slice = teacher_data[i : i + 1, t_start - 1 : -1]
+        s_slice = student_logits[i : i + 1, s_start - 1 : -1, :]
+        t_tail_mask = t_mask[t_start:].float().unsqueeze(0)
+        s_tail_mask = s_mask[s_start:].float().unsqueeze(0)
+
+        min_len = min(
+            t_slice.shape[1],
+            s_slice.shape[1],
+            t_tail_mask.shape[1],
+            s_tail_mask.shape[1],
+        )
+        if min_len == 0:
+            return None
+
+        combined_mask = t_tail_mask[:, :min_len] * s_tail_mask[:, :min_len]
+        if combined_mask.sum() == 0:
+            return None
+        return (
+            t_slice[:, :min_len],
+            s_slice[:, :min_len, :],
+            combined_mask,
+        )
+
     def _kl_from_logits(
         self,
         teacher_logits: torch.Tensor,
@@ -314,50 +370,21 @@ class ContextBakingTrainer(Trainer):
         teacher_mask_padded: torch.BoolTensor,
         student_mask_padded: torch.BoolTensor,
     ) -> Optional[torch.Tensor]:
-        """Compute mean per-example KL over aligned target tokens.
-
-        Logits at position t predict token t+1, so we shift by 1. Teacher and
-        student may have different prefix lengths, so we align on the trainable
-        region by finding the first target token in each and taking the common
-        length.
-        """
+        """Dense KL over the full vocab (local-toggle mode)."""
         losses = []
         B = teacher_logits.shape[0]
-        device = student_logits.device
 
         for i in range(B):
-            t_mask = teacher_mask_padded[i].to(device)
-            s_mask = student_mask_padded[i].to(device)
-
-            t_target_positions = t_mask.nonzero(as_tuple=False).squeeze(-1)
-            s_target_positions = s_mask.nonzero(as_tuple=False).squeeze(-1)
-            if t_target_positions.numel() == 0 or s_target_positions.numel() == 0:
-                continue
-
-            t_start = int(t_target_positions[0].item())
-            s_start = int(s_target_positions[0].item())
-
-            # Logits predict next token → shift by 1.
-            t_logits = teacher_logits[i : i + 1, t_start - 1 : -1, :]
-            s_logits = student_logits[i : i + 1, s_start - 1 : -1, :]
-            t_tail_mask = t_mask[t_start:].float().unsqueeze(0)
-            s_tail_mask = s_mask[s_start:].float().unsqueeze(0)
-
-            min_len = min(
-                t_logits.shape[1],
-                s_logits.shape[1],
-                t_tail_mask.shape[1],
-                s_tail_mask.shape[1],
+            aligned = self._align_and_slice(
+                i,
+                teacher_logits,
+                student_logits,
+                teacher_mask_padded,
+                student_mask_padded,
             )
-            if min_len == 0:
+            if aligned is None:
                 continue
-
-            t_logits = t_logits[:, :min_len, :]
-            s_logits = s_logits[:, :min_len, :]
-            combined_mask = t_tail_mask[:, :min_len] * s_tail_mask[:, :min_len]
-            if combined_mask.sum() == 0:
-                continue
-
+            t_logits, s_logits, combined_mask = aligned
             loss = compute_kl_divergence(
                 t_logits.detach() if t_logits.requires_grad else t_logits,
                 s_logits,
@@ -370,13 +397,75 @@ class ContextBakingTrainer(Trainer):
             return None
         return torch.stack(losses).mean()
 
+    def _kl_from_topk(
+        self,
+        teacher_indices: torch.Tensor,
+        teacher_logprobs: torch.Tensor,
+        student_logits: torch.Tensor,
+        teacher_mask_padded: torch.BoolTensor,
+        student_mask_padded: torch.BoolTensor,
+    ) -> Optional[torch.Tensor]:
+        """Top-k KL — external-teacher mode.
+
+        Same alignment + shift logic as `_kl_from_logits`, but teacher data is
+        sparse (per-position top-k indices + logprobs renormalized over those K).
+        """
+        losses = []
+        B = teacher_indices.shape[0]
+        device = student_logits.device
+
+        for i in range(B):
+            aligned_idx = self._align_and_slice(
+                i,
+                teacher_indices,
+                student_logits,
+                teacher_mask_padded,
+                student_mask_padded,
+            )
+            if aligned_idx is None:
+                continue
+            t_idx, s_logits, combined_mask = aligned_idx
+            # Align values to the same window.
+            min_len = t_idx.shape[1]
+            t_mask = teacher_mask_padded[i].to(device)
+            t_pos = t_mask.nonzero(as_tuple=False).squeeze(-1)
+            if t_pos.numel() == 0:
+                continue
+            t_start = int(t_pos[0].item())
+            t_vals = teacher_logprobs[i : i + 1, t_start - 1 : -1][:, :min_len]
+            t_idx = t_idx.to(device)
+            t_vals = t_vals.to(device)
+
+            loss = topk_forward_kl(
+                student_logits=s_logits,
+                teacher_topk_indices=t_idx,
+                teacher_topk_logprobs=t_vals,
+                mask=combined_mask,
+                temperature=self.kl_temperature,
+            )
+            losses.append(loss)
+
+        if not losses:
+            return None
+        return torch.stack(losses).mean()
+
     # -- Trajectory generation --
 
     def _generate_trajectory(self, user_message: str) -> str:
-        """Generate a response from the teacher (adapters disabled, full prefix visible)."""
+        """Generate a response from the teacher.
+
+        External teacher: delegate to `teacher_backend.generate`. Local-toggle:
+        disable adapters on the student model and sample.
+        """
         teacher_messages = list(self.prefix_messages) + [
             {"role": "user", "content": user_message}
         ]
+
+        if self.teacher_backend is not None:
+            return self.teacher_backend.generate(
+                teacher_messages, max_new_tokens=self.trajectory_length
+            )
+
         prompt = self.processing_class.apply_chat_template(
             teacher_messages, tokenize=False, add_generation_prompt=True
         )
@@ -404,27 +493,59 @@ class ContextBakingTrainer(Trainer):
     def _zero_loss(self) -> torch.Tensor:
         return torch.tensor(0.0, device=self.args.device, requires_grad=True)
 
+    def _teacher_forward(self, model, batch):
+        """Run the teacher forward and return either (full_logits, None) or
+        (topk_indices, topk_logprobs) — caller decides which KL path to use.
+
+        External teacher: returns top-k. Local-toggle: returns full logits.
+        """
+        if self.teacher_backend is not None:
+            tk = self.teacher_backend.score(
+                input_ids=batch["teacher_fwd"]["input_ids"],
+                attention_mask=batch["teacher_fwd"]["attention_mask"],
+                top_k=self.teacher_top_k,
+            )
+            return ("topk", tk.indices, tk.values)
+        with torch.no_grad():
+            with disable_adapters(model):
+                out = model(**batch["teacher_fwd"])
+        return ("dense", out.logits, None)
+
+    def _kl_dispatch(self, teacher_payload, student_logits, batch):
+        mode = teacher_payload[0]
+        if mode == "dense":
+            return self._kl_from_logits(
+                teacher_payload[1],
+                student_logits,
+                batch["teacher_mask_padded"],
+                batch["student_mask_padded"],
+            )
+        return self._kl_from_topk(
+            teacher_indices=teacher_payload[1],
+            teacher_logprobs=teacher_payload[2],
+            student_logits=student_logits,
+            teacher_mask_padded=batch["teacher_mask_padded"],
+            student_mask_padded=batch["student_mask_padded"],
+        )
+
     def compute_loss(
         self, model, inputs, return_outputs=False, num_items_in_batch=None
     ):
-        """Compute KL divergence loss with batched forward passes."""
+        """Compute KL divergence loss with batched forward passes.
+
+        Dispatches between local-toggle (dense KL on full logits) and external-
+        teacher (top-k KL on sparse logprobs) based on `teacher_backend`.
+        """
         batch = self._build_batch(inputs, model)
         if batch is None:
             logger.warning("Empty batch after building — returning zero loss")
             zero = self._zero_loss()
             return (zero, None) if return_outputs else zero
 
-        with torch.no_grad():
-            with disable_adapters(model):
-                teacher_outputs = model(**batch["teacher_fwd"])
+        teacher_payload = self._teacher_forward(model, batch)
         student_outputs = model(**batch["student_fwd"])
 
-        loss = self._kl_from_logits(
-            teacher_outputs.logits,
-            student_outputs.logits,
-            batch["teacher_mask_padded"],
-            batch["student_mask_padded"],
-        )
+        loss = self._kl_dispatch(teacher_payload, student_outputs.logits, batch)
         if loss is None:
             logger.warning("No aligned logit pairs after slicing — returning zero loss")
             zero = self._zero_loss()
@@ -450,18 +571,38 @@ class ContextBakingTrainer(Trainer):
 
         base = model.module if hasattr(model, "module") else model
         fwd_fn = type(base).forward
-        with torch.no_grad():
-            with disable_adapters(base):
-                teacher_logits = fwd_fn(base, **batch["teacher_fwd"]).logits.cpu()
+        if self.teacher_backend is not None:
+            tk = self.teacher_backend.score(
+                input_ids=batch["teacher_fwd"]["input_ids"],
+                attention_mask=batch["teacher_fwd"]["attention_mask"],
+                top_k=self.teacher_top_k,
+            )
+            teacher_payload = ("topk", tk.indices.cpu(), tk.values.cpu())
             torch.cuda.empty_cache()
-            student_outputs = fwd_fn(base, **batch["student_fwd"])
+            with torch.no_grad():
+                student_outputs = fwd_fn(base, **batch["student_fwd"])
+        else:
+            with torch.no_grad():
+                with disable_adapters(base):
+                    teacher_logits = fwd_fn(base, **batch["teacher_fwd"]).logits.cpu()
+                torch.cuda.empty_cache()
+                student_outputs = fwd_fn(base, **batch["student_fwd"])
+            teacher_payload = (
+                "dense",
+                teacher_logits.to(student_outputs.logits.device),
+                None,
+            )
 
-        loss = self._kl_from_logits(
-            teacher_logits.to(student_outputs.logits.device),
-            student_outputs.logits,
-            batch["teacher_mask_padded"],
-            batch["student_mask_padded"],
-        )
+        # Re-hydrate topk tensors onto student device for the KL step.
+        if teacher_payload[0] == "topk":
+            dev = student_outputs.logits.device
+            teacher_payload = (
+                "topk",
+                teacher_payload[1].to(dev),
+                teacher_payload[2].to(dev),
+            )
+
+        loss = self._kl_dispatch(teacher_payload, student_outputs.logits, batch)
         if loss is None:
             return (self._zero_loss(), None, None)
         return (loss.detach(), None, None)

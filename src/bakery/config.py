@@ -249,6 +249,83 @@ class LoraConfig:
 
 
 @dataclass
+class TeacherConfig:
+    """External teacher backend configuration for GKD / context distillation.
+
+    Default `teacher_backend="local-toggle"` keeps the original bakery behavior:
+    the student model with LoRA adapters serves as its own teacher when the
+    adapters are disabled. Set to "hf", "vllm", or "openai" to use a separate
+    teacher model — required for distilling a stronger model into a smaller one
+    ("elevated skill" + prefix context baked in one sweep).
+
+    All field names are prefixed with `teacher_` to avoid CLI flag collisions
+    with DataConfig (which controls the student model).
+    """
+
+    teacher_backend: str = field(
+        default="local-toggle",
+        metadata={
+            "help": "Teacher source: 'local-toggle' (default; same model, "
+            "adapters off), 'hf' (separate HuggingFace model), 'vllm' (vLLM "
+            "OpenAI-compatible server), or 'openai' (any OpenAI-compat API "
+            "with logprobs)."
+        },
+    )
+    teacher_model_name_or_path: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Teacher model name (required for 'hf'). For 'vllm'/'openai' "
+            "this is the model identifier the server expects (falls back to teacher_api_model)."
+        },
+    )
+    teacher_api_base: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Base URL for OpenAI-compat / vLLM API (e.g. http://localhost:8000/v1)."
+        },
+    )
+    teacher_api_key: Optional[str] = field(
+        default=None,
+        metadata={"help": "API key; falls back to OPENAI_API_KEY env var."},
+    )
+    teacher_api_model: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Model name to send in API requests (when different from "
+            "teacher_model_name_or_path)."
+        },
+    )
+    teacher_torch_dtype: str = field(
+        default="bfloat16",
+        metadata={"help": "Dtype for HF teacher (float32, float16, bfloat16)."},
+    )
+    teacher_device: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Device for HF teacher: 'cuda', 'cuda:1', 'cpu', or None for auto."
+        },
+    )
+    teacher_trust_remote_code: bool = field(
+        default=False,
+        metadata={"help": "Trust remote code when loading HF teacher."},
+    )
+    teacher_attn_implementation: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Attention impl for HF teacher: flash_attention_2, sdpa, eager."
+        },
+    )
+    teacher_top_k: int = field(
+        default=64,
+        metadata={
+            "help": "How many tokens of the teacher's distribution to keep per "
+            "position when computing KL. K covering the full vocab → identical to "
+            "dense KL. Lower K → cheaper, sparser. API backends often cap at 20."
+        },
+    )
+
+
+@dataclass
 class ContextConfig:
     """Prefix context and target-mask configuration for context baking.
 

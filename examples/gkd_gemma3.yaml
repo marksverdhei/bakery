@@ -1,0 +1,63 @@
+# GKD + context baking: distill Gemma 3 1B (teacher) into Gemma 3 270M (student)
+# in a single sweep, with a prefix context baked into the student weights.
+#
+# Both models share the same tokenizer, so we can score student-tokenized
+# sequences against the teacher directly. The student picks up:
+#   - the prefix context (baked away from inference-time tokens)
+#   - the teacher's stronger behavior (top-k forward KL)
+#
+# LoRA stays on by default as a regularizer to avoid degradation under the
+# combined objective.
+#
+# Usage:
+#   bakery --config examples/gkd_gemma3.yaml
+
+# --- Standard TrainingArguments ---
+output_dir: "./outputs/gkd_gemma3"
+num_train_epochs: 1
+learning_rate: 1e-4
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 4
+logging_steps: 5
+save_strategy: "epoch"
+bf16: true
+report_to: "none"
+seed: 42
+
+# --- Student model (the one we're training) ---
+model_name_or_path: "google/gemma-3-270m-it"
+torch_dtype: "bfloat16"
+attn_implementation: "sdpa"
+
+# --- Teacher: a separate Gemma 3 1B, in-process HF ---
+teacher_backend: "hf"
+teacher_model_name_or_path: "google/gemma-3-1b-it"
+teacher_torch_dtype: "bfloat16"
+teacher_top_k: 64
+
+# --- Context to bake (in addition to teacher capability) ---
+prefix_messages:
+  - role: system
+    content: "Answer in one short sentence."
+student_retained_turns: 0
+target_roles:
+  - assistant
+
+# --- LoRA (default, regularizes student under the combined objective) ---
+r: 16
+lora_alpha: 32
+target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+lora_dropout: 0.05
+
+# --- Data: small prompt set for a smoke run ---
+training_prompts:
+  - "What is the capital of France?"
+  - "What color is the sky?"
+  - "Name a prime number greater than ten."
+  - "What is two plus two?"
+num_trajectories: 1
+trajectory_length: 32
