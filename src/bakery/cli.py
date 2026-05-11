@@ -412,12 +412,15 @@ def main():
         train_dataset = create_dataset(training_prompts, precomputed_responses)
 
     eval_dataset = None
-    if data_config.eval_dataset_split and data_config.dataset:
-        print(f"  Loading eval split: {data_config.eval_dataset_split}")
+    _eval_source = data_config.eval_dataset or data_config.dataset
+    _eval_split = data_config.eval_dataset_split
+    if _eval_split and _eval_source:
+        print(
+            f"  Loading eval split: {_eval_split}"
+            + (f" from {data_config.eval_dataset}" if data_config.eval_dataset else "")
+        )
         try:
-            eval_rows = load_conversations(
-                data_config.dataset, data_config.eval_dataset_split
-            )
+            eval_rows = load_conversations(_eval_source, _eval_split)
             eval_dataset = create_conversational_dataset(eval_rows)
         except Exception:
             eval_prompts, eval_responses = load_data(
@@ -425,8 +428,8 @@ def main():
                     "_DC",
                     (),
                     {
-                        "dataset": data_config.dataset,
-                        "dataset_split": data_config.eval_dataset_split,
+                        "dataset": _eval_source,
+                        "dataset_split": _eval_split,
                         "training_prompts": None,
                     },
                 )()
