@@ -323,6 +323,23 @@ class TeacherConfig:
             "dense KL. Lower K → cheaper, sparser. API backends often cap at 20."
         },
     )
+    gkd_on_policy_fraction: float = field(
+        default=0.0,
+        metadata={
+            "help": "Fraction of training trajectories sampled on-policy from the "
+            "student (vs. from the teacher). 0.0 = pure off-policy distillation "
+            "(default). 1.0 = pure on-policy (the GKD recipe). Mixed values yield "
+            "stochastic per-batch routing."
+        },
+    )
+    gkd_jsd_beta: float = field(
+        default=0.0,
+        metadata={
+            "help": "Mix between forward and reverse KL. 0.0 = forward KL "
+            "(teacher → student, mode-covering, default). 1.0 = reverse KL "
+            "(mode-seeking, used in on-policy GKD). 0.5 = symmetric JSD."
+        },
+    )
 
 
 @dataclass

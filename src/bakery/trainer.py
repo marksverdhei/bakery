@@ -28,7 +28,12 @@ from transformers import (
 )
 from transformers.trainer_utils import EvalPrediction
 
-from bakery.kl import compute_kl_divergence, disable_adapters, topk_forward_kl
+from bakery.kl import (
+    compute_kl_divergence,
+    disable_adapters,
+    topk_forward_kl,
+    topk_jsd,
+)
 from bakery.masking import build_target_mask
 from bakery.teachers.base import TeacherBackend
 
@@ -53,6 +58,8 @@ class ContextBakingTrainer(Trainer):
         context_config=None,
         teacher_backend: Optional[TeacherBackend] = None,
         teacher_top_k: int = 64,
+        gkd_on_policy_fraction: float = 0.0,
+        gkd_jsd_beta: float = 0.0,
         train_dataset: Dataset | None = None,
         eval_dataset: Dataset | None = None,
         processing_class: PreTrainedTokenizerBase | None = None,
@@ -70,6 +77,14 @@ class ContextBakingTrainer(Trainer):
         self.kl_temperature = args.temperature
         self.teacher_backend = teacher_backend
         self.teacher_top_k = teacher_top_k
+        if not (0.0 <= gkd_on_policy_fraction <= 1.0):
+            raise ValueError(
+                f"gkd_on_policy_fraction must be in [0, 1], got {gkd_on_policy_fraction}"
+            )
+        if not (0.0 <= gkd_jsd_beta <= 1.0):
+            raise ValueError(f"gkd_jsd_beta must be in [0, 1], got {gkd_jsd_beta}")
+        self.gkd_on_policy_fraction = gkd_on_policy_fraction
+        self.gkd_jsd_beta = gkd_jsd_beta
 
         # Back-compat: if no ContextConfig is passed but args has system_prompt,
         # auto-desugar into a minimal ContextConfig. Keeps direct-instantiation
@@ -120,6 +135,13 @@ class ContextBakingTrainer(Trainer):
             top_p=0.9,
             pad_token_id=self.processing_class.pad_token_id,
         )
+
+        # API teachers re-encode their returned token strings against the
+        # student tokenizer; register it now so they can.
+        if self.teacher_backend is not None and hasattr(
+            self.teacher_backend, "set_student_tokenizer"
+        ):
+            self.teacher_backend.set_student_tokenizer(self.processing_class)
 
     # -- Tokenization --
 
@@ -436,13 +458,23 @@ class ContextBakingTrainer(Trainer):
             t_idx = t_idx.to(device)
             t_vals = t_vals.to(device)
 
-            loss = topk_forward_kl(
-                student_logits=s_logits,
-                teacher_topk_indices=t_idx,
-                teacher_topk_logprobs=t_vals,
-                mask=combined_mask,
-                temperature=self.kl_temperature,
-            )
+            if self.gkd_jsd_beta > 0.0:
+                loss = topk_jsd(
+                    student_logits=s_logits,
+                    teacher_topk_indices=t_idx,
+                    teacher_topk_logprobs=t_vals,
+                    mask=combined_mask,
+                    beta=self.gkd_jsd_beta,
+                    temperature=self.kl_temperature,
+                )
+            else:
+                loss = topk_forward_kl(
+                    student_logits=s_logits,
+                    teacher_topk_indices=t_idx,
+                    teacher_topk_logprobs=t_vals,
+                    mask=combined_mask,
+                    temperature=self.kl_temperature,
+                )
             losses.append(loss)
 
         if not losses:
@@ -451,12 +483,49 @@ class ContextBakingTrainer(Trainer):
 
     # -- Trajectory generation --
 
-    def _generate_trajectory(self, user_message: str) -> str:
-        """Generate a response from the teacher.
+    def _sample_from_student(self, user_message: str) -> str:
+        """On-policy GKD: sample a response from the student (adapters ENABLED).
 
-        External teacher: delegate to `teacher_backend.generate`. Local-toggle:
-        disable adapters on the student model and sample.
+        The student sees what it would see at inference time — its own trimmed
+        view (last `student_retained_turns` of the prefix), not the teacher's
+        full context. This is what gives on-policy GKD its mode-seeking pull.
         """
+        prefix = self._student_prefix(self.prefix_messages)
+        student_messages = list(prefix) + [{"role": "user", "content": user_message}]
+        prompt = self.processing_class.apply_chat_template(
+            student_messages, tokenize=False, add_generation_prompt=True
+        )
+        inputs = self._tokenize(prompt, return_tensors="pt").to(self.model.device)
+
+        was_training = self.model.training
+        self.model.eval()
+        with torch.no_grad():
+            outputs = self.model.generate(
+                **inputs, generation_config=self.generation_config
+            )
+        if was_training:
+            self.model.train()
+        response = self.processing_class.decode(
+            outputs[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True
+        )
+        return response.strip()
+
+    def _generate_trajectory(self, user_message: str) -> str:
+        """Generate a response.
+
+        Routing:
+          - With probability `gkd_on_policy_fraction`, sample from the student
+            itself (on-policy GKD). The teacher will then score those samples
+            during the loss step.
+          - Otherwise sample from the teacher: external `teacher_backend.generate`
+            if configured, else the same model with adapters disabled.
+        """
+        if self.gkd_on_policy_fraction > 0.0:
+            import random
+
+            if random.random() < self.gkd_on_policy_fraction:
+                return self._sample_from_student(user_message)
+
         teacher_messages = list(self.prefix_messages) + [
             {"role": "user", "content": user_message}
         ]

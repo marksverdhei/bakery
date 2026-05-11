@@ -2,9 +2,10 @@
 
 import math
 
+import pytest
 import torch
 
-from bakery.kl import compute_kl_divergence, topk_forward_kl
+from bakery.kl import compute_kl_divergence, topk_forward_kl, topk_jsd
 from bakery.teachers.base import topk_from_logits
 
 
@@ -137,3 +138,66 @@ def test_topk_kl_handles_partial_mask():
     loss = topk_forward_kl(student_logits, idx, lp, mask)
     # 5 active positions out of 10.
     assert loss.item() > 0
+
+
+# ---------- topk_jsd ----------
+
+
+def test_topk_jsd_zero_when_distributions_match():
+    """JSD between identical distributions is 0 at any β."""
+    torch.manual_seed(10)
+    logits = torch.randn(1, 4, 30, requires_grad=True)
+    idx, lp = topk_from_logits(logits.detach(), top_k=12)
+    mask = torch.ones(1, 4)
+    for beta in (0.0, 0.25, 0.5, 0.75, 1.0):
+        loss = topk_jsd(logits, idx, lp, mask, beta=beta)
+        assert loss.item() < 1e-4
+
+
+def test_topk_jsd_beta_zero_equals_forward_kl():
+    """β=0 reduces to forward KL."""
+    torch.manual_seed(11)
+    V = 30
+    teacher_logits = torch.randn(2, 4, V)
+    student_logits = torch.randn(2, 4, V)
+    idx, lp = topk_from_logits(teacher_logits, top_k=10)
+    mask = torch.ones(2, 4)
+    forward = topk_forward_kl(student_logits, idx, lp, mask)
+    jsd_b0 = topk_jsd(student_logits, idx, lp, mask, beta=0.0)
+    assert torch.allclose(forward, jsd_b0, atol=1e-4)
+
+
+def test_topk_jsd_symmetric_at_half():
+    """β=0.5 should equal (forward + reverse) / 2."""
+    torch.manual_seed(12)
+    teacher_logits = torch.randn(1, 4, 40)
+    student_logits = torch.randn(1, 4, 40)
+    idx, lp = topk_from_logits(teacher_logits, top_k=10)
+    mask = torch.ones(1, 4)
+    forward = topk_jsd(student_logits, idx, lp, mask, beta=0.0)
+    reverse = topk_jsd(student_logits, idx, lp, mask, beta=1.0)
+    mid = topk_jsd(student_logits, idx, lp, mask, beta=0.5)
+    expected = 0.5 * (forward + reverse)
+    assert torch.allclose(mid, expected, atol=1e-5)
+
+
+def test_topk_jsd_differentiable():
+    torch.manual_seed(13)
+    student_logits = torch.randn(1, 3, 20, requires_grad=True)
+    teacher_logits = torch.randn(1, 3, 20)
+    idx, lp = topk_from_logits(teacher_logits, top_k=5)
+    mask = torch.ones(1, 3)
+    loss = topk_jsd(student_logits, idx, lp, mask, beta=0.5)
+    loss.backward()
+    assert student_logits.grad is not None
+    assert student_logits.grad.abs().sum() > 0
+
+
+def test_topk_jsd_rejects_invalid_beta():
+    student_logits = torch.randn(1, 1, 5)
+    idx = torch.zeros(1, 1, 2, dtype=torch.long)
+    lp = torch.full((1, 1, 2), -math.log(2.0))
+    mask = torch.ones(1, 1)
+    for bad in (-0.1, 1.1, 2.0):
+        with pytest.raises(ValueError, match="beta"):
+            topk_jsd(student_logits, idx, lp, mask, beta=bad)

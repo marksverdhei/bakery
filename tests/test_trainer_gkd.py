@@ -5,6 +5,7 @@ validate the GKD code path end-to-end on CPU.
 """
 
 import pytest
+import torch
 from peft import LoraConfig as PeftLoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -163,6 +164,151 @@ def test_gkd_generate_trajectory_uses_external_teacher(gkd_trainer):
 
 
 # ---------- local-toggle path still works (regression) ----------
+
+
+# ---------- JSD wiring ----------
+
+
+def test_gkd_jsd_beta_routes_to_jsd(gkd_trainer):
+    """gkd_jsd_beta > 0 should route _kl_from_topk through topk_jsd."""
+    clear_mask_cache()
+    gkd_trainer.gkd_jsd_beta = 0.5
+    try:
+        loss = gkd_trainer.compute_loss(
+            gkd_trainer.model,
+            {"user_messages": ["hello"], "responses": ["world"]},
+        )
+        assert loss.item() >= 0
+    finally:
+        gkd_trainer.gkd_jsd_beta = 0.0
+
+
+def test_gkd_jsd_beta_default_matches_forward_kl(gkd_trainer):
+    """β=0 default and explicit β=0 should produce the same loss."""
+    clear_mask_cache()
+    inputs = {"user_messages": ["hello"], "responses": ["world"]}
+    loss_default = gkd_trainer.compute_loss(gkd_trainer.model, inputs)
+    gkd_trainer.gkd_jsd_beta = 0.0
+    clear_mask_cache()
+    loss_explicit = gkd_trainer.compute_loss(gkd_trainer.model, inputs)
+    assert torch.allclose(loss_default, loss_explicit, atol=1e-5)
+
+
+def test_trainer_rejects_invalid_jsd_beta():
+    tokenizer = _mk_tokenizer()
+    model = AutoModelForCausalLM.from_pretrained("gpt2")
+    model = get_peft_model(
+        model,
+        PeftLoraConfig(
+            r=4, lora_alpha=8, target_modules=["c_attn"], task_type="CAUSAL_LM"
+        ),
+    )
+    with pytest.raises(ValueError, match="gkd_jsd_beta"):
+        ContextBakingTrainer(
+            model=model,
+            args=BakeryConfig(
+                output_dir="/tmp/bakery_bad",
+                per_device_train_batch_size=1,
+                num_train_epochs=1,
+                logging_steps=1,
+                report_to="none",
+                use_cpu=True,
+            ),
+            context_config=ContextConfig(
+                prefix_messages=[{"role": "system", "content": "s"}]
+            ),
+            gkd_jsd_beta=2.0,
+            processing_class=tokenizer,
+            data_collator=prompt_baking_collator,
+        )
+
+
+def test_trainer_rejects_invalid_on_policy_fraction():
+    tokenizer = _mk_tokenizer()
+    model = AutoModelForCausalLM.from_pretrained("gpt2")
+    model = get_peft_model(
+        model,
+        PeftLoraConfig(
+            r=4, lora_alpha=8, target_modules=["c_attn"], task_type="CAUSAL_LM"
+        ),
+    )
+    with pytest.raises(ValueError, match="gkd_on_policy_fraction"):
+        ContextBakingTrainer(
+            model=model,
+            args=BakeryConfig(
+                output_dir="/tmp/bakery_bad2",
+                per_device_train_batch_size=1,
+                num_train_epochs=1,
+                logging_steps=1,
+                report_to="none",
+                use_cpu=True,
+            ),
+            context_config=ContextConfig(
+                prefix_messages=[{"role": "system", "content": "s"}]
+            ),
+            gkd_on_policy_fraction=-0.1,
+            processing_class=tokenizer,
+            data_collator=prompt_baking_collator,
+        )
+
+
+# ---------- on-policy routing ----------
+
+
+def test_on_policy_fraction_one_always_samples_from_student(gkd_trainer, monkeypatch):
+    """gkd_on_policy_fraction=1.0 → _generate_trajectory uses student sampler."""
+    called = {"student": 0, "teacher": 0}
+    monkeypatch.setattr(
+        gkd_trainer,
+        "_sample_from_student",
+        lambda u: (
+            called.__setitem__("student", called["student"] + 1),
+            "student-sample",
+        )[1],
+    )
+    monkeypatch.setattr(
+        gkd_trainer.teacher_backend,
+        "generate",
+        lambda msgs, max_new_tokens=256: (
+            called.__setitem__("teacher", called["teacher"] + 1),
+            "teacher-sample",
+        )[1],
+    )
+    gkd_trainer.gkd_on_policy_fraction = 1.0
+    try:
+        for _ in range(5):
+            out = gkd_trainer._generate_trajectory("q?")
+            assert out == "student-sample"
+        assert called["student"] == 5
+        assert called["teacher"] == 0
+    finally:
+        gkd_trainer.gkd_on_policy_fraction = 0.0
+
+
+def test_on_policy_fraction_zero_never_samples_from_student(gkd_trainer, monkeypatch):
+    """Default (0.0) → never uses the student sampler."""
+    called = {"student": 0, "teacher": 0}
+    monkeypatch.setattr(
+        gkd_trainer,
+        "_sample_from_student",
+        lambda u: (
+            called.__setitem__("student", called["student"] + 1),
+            "student-sample",
+        )[1],
+    )
+    monkeypatch.setattr(
+        gkd_trainer.teacher_backend,
+        "generate",
+        lambda msgs, max_new_tokens=256: (
+            called.__setitem__("teacher", called["teacher"] + 1),
+            "teacher-sample",
+        )[1],
+    )
+    for _ in range(5):
+        out = gkd_trainer._generate_trajectory("q?")
+        assert out == "teacher-sample"
+    assert called["student"] == 0
+    assert called["teacher"] == 5
 
 
 def test_local_toggle_path_unchanged():

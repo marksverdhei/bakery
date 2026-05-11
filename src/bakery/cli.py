@@ -464,6 +464,8 @@ def main():
         context_config=context_config,
         teacher_backend=teacher_backend,
         teacher_top_k=teacher_config.teacher_top_k,
+        gkd_on_policy_fraction=teacher_config.gkd_on_policy_fraction,
+        gkd_jsd_beta=teacher_config.gkd_jsd_beta,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         processing_class=tokenizer,
