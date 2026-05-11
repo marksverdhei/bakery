@@ -49,6 +49,14 @@ def evaluate_model(
             model.device
         )
 
+        # Gemma 4 requires token_type_ids and mm_token_type_ids even for text-only.
+        _mtype = getattr(model.config, "model_type", None)
+        if _mtype in ("gemma3", "gemma4", "gemma4_text"):
+            if "token_type_ids" not in inputs:
+                inputs["token_type_ids"] = torch.zeros_like(inputs["input_ids"])
+            if _mtype in ("gemma4", "gemma4_text"):
+                inputs["mm_token_type_ids"] = torch.zeros_like(inputs["input_ids"])
+
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,

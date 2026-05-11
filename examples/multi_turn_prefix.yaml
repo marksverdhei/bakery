@@ -1,0 +1,62 @@
+# Multi-turn prefix baking: system + few-shot examples.
+#
+# The teacher sees a system prompt plus a few-shot user/assistant pair
+# before each training example; the student sees none of that (pure
+# baking). KL distills the conditioned-teacher behavior into LoRA.
+#
+# Usage:
+#   bakery --config examples/multi_turn_prefix.yaml
+
+# --- Standard TrainingArguments ---
+output_dir: "./outputs/multi_turn_prefix"
+num_train_epochs: 3
+learning_rate: 1e-4
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 4
+logging_steps: 5
+save_strategy: "epoch"
+bf16: true
+report_to: "none"
+seed: 42
+
+# --- Context baking (prefix = system + few-shot) ---
+prefix_messages:
+  - role: system
+    content: "You answer concisely, in one short sentence."
+  - role: user
+    content: "What is the capital of France?"
+  - role: assistant
+    content: "Paris."
+  - role: user
+    content: "What color is the sky?"
+  - role: assistant
+    content: "Blue."
+
+# Pure baking: student sees no prefix at all.
+student_retained_turns: 0
+
+# Only assistant tokens contribute to KL loss (default).
+target_roles:
+  - assistant
+
+# --- Model ---
+model_name_or_path: "Qwen/Qwen3-0.6B"
+torch_dtype: "bfloat16"
+attn_implementation: "sdpa"
+
+# --- LoRA ---
+r: 32
+lora_alpha: 64
+target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+lora_dropout: 0.05
+
+# --- Data ---
+training_prompts:
+  - "How many legs does a spider have?"
+  - "What is the boiling point of water?"
+  - "Name a prime number greater than ten."
+  - "Who wrote Hamlet?"

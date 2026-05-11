@@ -1,0 +1,62 @@
+# Pattern-filtered target masking.
+#
+# Not every assistant turn deserves KL loss — only those whose content
+# matches a regex. Useful when your data mixes chain-of-thought with
+# final answers and you only want to distill the final answers, or when
+# you want to bake only the "structured" portion of multi-style replies.
+#
+# Here: only assistant messages whose content starts with "Answer:" are
+# treated as targets. Everything else (system, user, non-matching
+# assistant turns) is passed through to both teacher and student but
+# contributes zero loss.
+#
+# Usage:
+#   bakery --config examples/pattern_targets.yaml
+
+# --- Standard TrainingArguments ---
+output_dir: "./outputs/pattern_targets"
+num_train_epochs: 2
+learning_rate: 1e-4
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 2
+logging_steps: 5
+save_strategy: "epoch"
+bf16: true
+report_to: "none"
+seed: 42
+
+# --- Context baking ---
+prefix_messages:
+  - role: system
+    content: >-
+      Reason step-by-step, then give a final answer on a new line
+      beginning with "Answer: ".
+
+student_retained_turns: 0
+target_roles:
+  - assistant
+
+# Only tokens from assistant messages that match this regex (re.search)
+# are scored by KL. CoT / reasoning prefixes are ignored.
+target_content_pattern: "^Answer:"
+
+# --- Model ---
+model_name_or_path: "Qwen/Qwen3-0.6B"
+torch_dtype: "bfloat16"
+attn_implementation: "sdpa"
+
+# --- LoRA ---
+r: 32
+lora_alpha: 64
+target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+lora_dropout: 0.05
+
+# --- Data ---
+training_prompts:
+  - "What is 17 times 3?"
+  - "If a train leaves at 3pm traveling 60mph, where is it at 5pm?"
+  - "How many vowels are in the word 'strawberry'?"
