@@ -1,0 +1,53 @@
+# GKD on Olivia: distill Gemma 3 27B aurora-SFT (teacher) into Gemma 3 4B (student).
+# Sibling of gkd_olivia_12b.yaml — same recipe, smaller student. See that file
+# for the full rationale.
+#
+# Usage on Olivia:
+#   sbatch olivia/run_gkd_node.sh examples/gkd_olivia_4b.yaml
+
+output_dir: "/cluster/projects/nn30001k/markuhei/bakery/outputs/gkd_aurora_27b_to_4b"
+num_train_epochs: 1
+learning_rate: 2e-4
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 4
+logging_steps: 10
+save_strategy: "epoch"
+bf16: true
+gradient_checkpointing: true
+report_to: "none"
+seed: 42
+max_seq_length: 2048
+
+model_name_or_path: "NbAiLab/nb-gpt-gemma3-4b-instruct-epoch-3-aurora-sft-2603-posttrain"
+torch_dtype: "bfloat16"
+attn_implementation: "sdpa"
+
+teacher_backend: "vllm"
+teacher_api_base: "http://localhost:8765/v1"
+teacher_api_model: "NbAiLab/nb-gpt-gemma3-27b-instruct-epoch-3-aurora-sft-2603-posttrain"
+teacher_top_k: 64
+
+gkd_on_policy_fraction: 0.5
+gkd_jsd_beta: 0.5
+temperature: 1.0
+
+prefix_messages: []
+target_roles:
+  - assistant
+
+r: 16
+lora_alpha: 32
+target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+lora_dropout: 0.05
+
+dataset: "NbAiLab/aurora-sft-2603"
+dataset_split: "train"
+trajectory_length: 256
+num_trajectories: 1

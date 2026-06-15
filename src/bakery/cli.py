@@ -19,7 +19,14 @@ from transformers import (
 )
 from peft import LoraConfig as PeftLoraConfig, get_peft_model
 
-from bakery.config import BakeryConfig, ContextConfig, DataConfig, LoraConfig
+from bakery.config import (
+    BakeryConfig,
+    ContextConfig,
+    DataConfig,
+    LoraConfig,
+    TeacherConfig,
+)
+from bakery.teachers import make_teacher
 from bakery.trainer import ContextBakingTrainer
 from bakery.data import (
     create_conversational_dataset,
@@ -78,11 +85,17 @@ def main():
     pre_args, remaining_args = pre_parser.parse_known_args()
     config_file = pre_args.config
 
-    parser = HfArgumentParser((BakeryConfig, DataConfig, LoraConfig, ContextConfig))
-
-    baking_config, data_config, lora_config, context_config = parser.parse_yaml_file(
-        config_file, allow_extra_keys=True
+    parser = HfArgumentParser(
+        (BakeryConfig, DataConfig, LoraConfig, ContextConfig, TeacherConfig)
     )
+
+    (
+        baking_config,
+        data_config,
+        lora_config,
+        context_config,
+        teacher_config,
+    ) = parser.parse_yaml_file(config_file, allow_extra_keys=True)
     # Apply CLI overrides on top of YAML config.
     # We parse the remaining CLI args into fresh dataclasses, then detect
     # which fields were explicitly set by comparing against a baseline
@@ -95,15 +108,15 @@ def main():
                 explicit_keys.add(arg.lstrip("-").replace("-", "_"))
 
         override_parser = HfArgumentParser(
-            (BakeryConfig, DataConfig, LoraConfig, ContextConfig)
+            (BakeryConfig, DataConfig, LoraConfig, ContextConfig, TeacherConfig)
         )
         overrides = override_parser.parse_args_into_dataclasses(
             args=["--output_dir", baking_config.output_dir] + remaining_args,
             return_remaining_strings=True,
         )
         for override_cfg, base_cfg in zip(
-            overrides[:4],
-            (baking_config, data_config, lora_config, context_config),
+            overrides[:5],
+            (baking_config, data_config, lora_config, context_config, teacher_config),
         ):
             for k, v in vars(override_cfg).items():
                 if k in explicit_keys:
@@ -141,12 +154,6 @@ def main():
             {"role": "system", "content": baking_config.system_prompt}
         ]
 
-    if not context_config.prefix_messages:
-        raise ValueError(
-            "No prefix context configured. Set prefix_messages (inline or via "
-            "prefix_messages_file), or the deprecated system_prompt / corpus_file."
-        )
-
     # Load data. Use conversational loader when the source preserves multi-turn
     # history (HF `messages` column or JSON rows with `messages`/`prefix_messages`);
     # otherwise use the simple (prompts, responses) path.
@@ -162,6 +169,14 @@ def main():
                 conversational_rows = None
         if conversational_rows is None:
             training_prompts, precomputed_responses = load_data(data_config)
+
+    if not context_config.prefix_messages and conversational_rows is None:
+        raise ValueError(
+            "No prefix context configured. Set prefix_messages (inline or via "
+            "prefix_messages_file), or the deprecated system_prompt / corpus_file. "
+            "Empty prefix is only valid when conversational rows carry their own "
+            "messages (e.g. an SFT chat dataset)."
+        )
     eval_qa = load_eval_data(data_config.eval_file)
     heldout_qa = load_eval_data(data_config.heldout_file)
 
@@ -437,10 +452,22 @@ def main():
             eval_dataset = create_dataset(eval_prompts, eval_responses)
         print(f"  Eval samples: {len(eval_dataset)}")
 
+    teacher_backend = make_teacher(teacher_config)
+    if teacher_backend is not None:
+        print(
+            f"  Teacher backend: {teacher_config.teacher_backend} "
+            f"({teacher_config.teacher_model_name_or_path or teacher_config.teacher_api_model}); "
+            f"top_k={teacher_config.teacher_top_k}"
+        )
+
     trainer = ContextBakingTrainer(
         model=model,
         args=baking_config,
         context_config=context_config,
+        teacher_backend=teacher_backend,
+        teacher_top_k=teacher_config.teacher_top_k,
+        gkd_on_policy_fraction=teacher_config.gkd_on_policy_fraction,
+        gkd_jsd_beta=teacher_config.gkd_jsd_beta,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         processing_class=tokenizer,
