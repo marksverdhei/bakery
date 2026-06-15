@@ -154,12 +154,6 @@ def main():
             {"role": "system", "content": baking_config.system_prompt}
         ]
 
-    if not context_config.prefix_messages:
-        raise ValueError(
-            "No prefix context configured. Set prefix_messages (inline or via "
-            "prefix_messages_file), or the deprecated system_prompt / corpus_file."
-        )
-
     # Load data. Use conversational loader when the source preserves multi-turn
     # history (HF `messages` column or JSON rows with `messages`/`prefix_messages`);
     # otherwise use the simple (prompts, responses) path.
@@ -175,6 +169,14 @@ def main():
                 conversational_rows = None
         if conversational_rows is None:
             training_prompts, precomputed_responses = load_data(data_config)
+
+    if not context_config.prefix_messages and conversational_rows is None:
+        raise ValueError(
+            "No prefix context configured. Set prefix_messages (inline or via "
+            "prefix_messages_file), or the deprecated system_prompt / corpus_file. "
+            "Empty prefix is only valid when conversational rows carry their own "
+            "messages (e.g. an SFT chat dataset)."
+        )
     eval_qa = load_eval_data(data_config.eval_file)
     heldout_qa = load_eval_data(data_config.heldout_file)
 

@@ -1,0 +1,70 @@
+# GKD on Olivia: distill Gemma 3 27B aurora-SFT (teacher) into Gemma 3 12B (student).
+#
+# Teacher is served by vLLM (TP=2) on the same node — `olivia/run_gkd_node.sh`
+# brings it up on GPU 0+1 before launching this trainer. The trainer connects
+# over localhost via the OpenAI-compatible /v1/completions endpoint with
+# echo=True, logprobs=K=64 (sparse top-k forward path in src/bakery/kl.py).
+#
+# Student is the matching aurora-SFT 12B checkpoint, so we are distilling the
+# 27B teacher's behavior *on top of* the same SFT initialization, not from
+# scratch. LoRA r=16 keeps the student trainable in a single GH200 (96GB),
+# and lets us co-locate it with the 27B-LoRA student on the same GPU per
+# Markus's call.
+#
+# Usage on Olivia:
+#   sbatch olivia/run_gkd_node.sh examples/gkd_olivia_12b.yaml
+
+# --- Standard TrainingArguments ---
+output_dir: "/cluster/projects/nn30001k/markuhei/bakery/outputs/gkd_aurora_27b_to_12b"
+num_train_epochs: 1
+learning_rate: 1e-4
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+logging_steps: 10
+save_strategy: "epoch"
+bf16: true
+gradient_checkpointing: true
+report_to: "none"
+seed: 42
+max_seq_length: 2048
+
+# --- Student model (the one we're training) ---
+model_name_or_path: "NbAiLab/nb-gpt-gemma3-12b-instruct-epoch-3-aurora-sft-2603-posttrain"
+torch_dtype: "bfloat16"
+attn_implementation: "sdpa"
+
+# --- Teacher: 27B aurora-SFT, served by vLLM TP=2 on localhost ---
+teacher_backend: "vllm"
+teacher_api_base: "http://localhost:8765/v1"
+teacher_api_model: "NbAiLab/nb-gpt-gemma3-27b-instruct-epoch-3-aurora-sft-2603-posttrain"
+teacher_top_k: 64
+
+# --- GKD recipe ---
+gkd_on_policy_fraction: 0.5
+gkd_jsd_beta: 0.5
+temperature: 1.0
+
+# --- No global prefix: aurora rows carry their own system + chat history ---
+# Both teacher and student were SFT-trained on this exact distribution; injecting
+# a synthetic system message would only push us off it. The trainer sees each
+# row's full `messages` list as-is. `student_retained_turns` is moot when the
+# prefix is empty (it only trims prefix_messages, never the row's turns).
+prefix_messages: []
+target_roles:
+  - assistant
+
+# --- LoRA ---
+r: 16
+lora_alpha: 32
+target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+lora_dropout: 0.05
+
+# --- Data: aurora SFT 2603 ---
+dataset: "NbAiLab/aurora-sft-2603"
+dataset_split: "train"
+trajectory_length: 256
+num_trajectories: 1

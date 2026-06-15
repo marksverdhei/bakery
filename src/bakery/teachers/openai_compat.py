@@ -68,8 +68,17 @@ class OpenAIAPITeacher(TeacherBackend):
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
+        # trust_env=False so HTTP_PROXY / HTTPS_PROXY in the environment do
+        # not hijack the request. On HPC nodes (e.g. Sigma2 Olivia) a transparent
+        # Squid proxy will otherwise rewrite localhost POSTs to /v1/completions
+        # into a proxy error page, silently breaking GKD when the teacher is
+        # served on the same node. The teacher endpoint is always explicitly
+        # configured via api_base, so respecting proxy env vars buys nothing.
         return httpx.Client(
-            base_url=self.api_base, headers=headers, timeout=self.timeout
+            base_url=self.api_base,
+            headers=headers,
+            timeout=self.timeout,
+            trust_env=False,
         )
 
     def score(
