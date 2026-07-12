@@ -173,3 +173,7 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 .worktrees
+
+# Local training artifacts
+outputs/
+unsloth_compiled_cache/
